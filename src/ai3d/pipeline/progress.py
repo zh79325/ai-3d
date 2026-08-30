@@ -35,7 +35,8 @@ STEP_DEFINITIONS: List[StepDef] = [
     StepDef("bg_remove", "背景移除", 15),
     StepDef("pose_estimate", "姿态估计", 35),
     StepDef("annotate_video", "标注视频合成", 10),
-    StepDef("depth_convert", "深度转换", 20),
+    StepDef("depth_convert", "深度转换", 15),
+    StepDef("smooth_3d", "3D 平滑与稳定化", 5),
     StepDef("validation", "数据校验", 3),
     StepDef("export_json", "导出动画数据", 7),
 ]

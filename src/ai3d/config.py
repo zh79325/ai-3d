@@ -54,13 +54,54 @@ class PipelineConfig:
     use_depth: bool = True
     use_physics: bool = True
     remove_background: bool = False  # 是否启用背景移除
-    smooth_frames: int = 5  # 平滑滤波窗口大小
     fps_override: Optional[int] = None  # 如果为 None,使用视频原始 FPS
     render_annotated_video: bool = True  # 是否用 YOLO 原生 plot 生成标注视频
     annotate_masks: bool = True  # 标注视频中绘制实例分割掩码（需 remove_background=True 才有分割结果）
     annotate_pose: bool = True  # 标注视频中绘制骨骼关键点
     annotate_mask_alpha: float = 0.45  # 掩码混合系数，越小越能看清原画面
     annotated_video_name: str = "annotated.mp4"  # 标注视频文件名
+
+
+@dataclass
+class SmoothingConfig:
+    """3D 姿态平滑与稳定化配置
+
+    处理顺序: 2D 时序平滑 -> 深度锚定反投影 -> 骨长约束 -> 根节点稳定化 -> 轨迹中值滤波。
+    调参口径见 .qoder/.plans 下的 3D_Smoothing_Optimization_Plan.md。
+    """
+    # --- 2D 关键点时序平滑 (OneEuro) ---
+    enable_2d_smoothing: bool = True
+    min_cutoff: float = 1.0  # 基础平滑强度，越小越平滑
+    beta: float = 0.007  # 速度系数，越大对快速运动响应越快
+    d_cutoff: float = 1.0  # 速度估计的截止频率
+
+    # --- 3D 反投影的深度融合 ---
+    depth_patch_radius: int = 2  # 深度采样邻域半径(像素)，避免单点命中背景
+    max_depth_deviation: float = 0.8  # 单点深度允许偏离躯干深度的上限(米)
+
+    # --- 骨长约束 ---
+    enable_bone_constraint: bool = True
+    bone_constraint_iterations: int = 4
+
+    # --- 尺度归一化 ---
+    normalize_scale: bool = True  # 把反投影结果缩放回真实人体尺度，下面的 m/s 参数才成立
+    target_torso_length: float = 0.5  # 成人肩中点到髋中点的参考长度(米)
+
+    # --- 根节点稳定化 ---
+    enable_root_stabilization: bool = True
+    max_horizontal_velocity: float = 2.0  # 髋部最大水平速度(m/s)，收紧以掐掉漂移
+    max_vertical_velocity: float = 8.0  # 髋部最大垂直速度(m/s)，放宽以容纳跳跃
+    recenter_alpha: float = 0.9  # 相对坐标偏移的跟随系数，越大越保留真实位移
+    ground_clamp: bool = True  # 脚不得穿透地面
+    ground_tolerance: float = 0.03  # 允许的穿地容差(米)
+    airborne_threshold: float = 0.1  # 腾空判定阈值(米)，腾空时不做地面吸附
+
+    # --- 轨迹中值滤波 ---
+    enable_trajectory_smoothing: bool = True
+    trajectory_window: int = 5  # 居中窗口大小(奇数)，越大越平滑
+
+    # 低于该置信度的关键点不参与统计，2D 平滑时保持上一次结果
+    keypoint_confidence_threshold: float = 0.3
 
 
 @dataclass
@@ -91,6 +132,7 @@ class Config:
     def __init__(self):
         self.model = ModelConfig()
         self.pipeline = PipelineConfig()
+        self.smoothing = SmoothingConfig()
         self.output = OutputConfig()
         self.export = ExportConfig()
         
@@ -116,6 +158,11 @@ class Config:
             for key, value in data['pipeline'].items():
                 if hasattr(config.pipeline, key):
                     setattr(config.pipeline, key, value)
+
+        if 'smoothing' in data:
+            for key, value in data['smoothing'].items():
+                if hasattr(config.smoothing, key):
+                    setattr(config.smoothing, key, value)
                     
         if 'output' in data:
             for key, value in data['output'].items():
@@ -152,13 +199,34 @@ class Config:
                 'use_depth': self.pipeline.use_depth,
                 'use_physics': self.pipeline.use_physics,
                 'remove_background': self.pipeline.remove_background,
-                'smooth_frames': self.pipeline.smooth_frames,
                 'fps_override': self.pipeline.fps_override,
                 'render_annotated_video': self.pipeline.render_annotated_video,
                 'annotate_masks': self.pipeline.annotate_masks,
                 'annotate_pose': self.pipeline.annotate_pose,
                 'annotate_mask_alpha': self.pipeline.annotate_mask_alpha,
                 'annotated_video_name': self.pipeline.annotated_video_name,
+            },
+            'smoothing': {
+                'enable_2d_smoothing': self.smoothing.enable_2d_smoothing,
+                'min_cutoff': self.smoothing.min_cutoff,
+                'beta': self.smoothing.beta,
+                'd_cutoff': self.smoothing.d_cutoff,
+                'depth_patch_radius': self.smoothing.depth_patch_radius,
+                'max_depth_deviation': self.smoothing.max_depth_deviation,
+                'enable_bone_constraint': self.smoothing.enable_bone_constraint,
+                'bone_constraint_iterations': self.smoothing.bone_constraint_iterations,
+                'normalize_scale': self.smoothing.normalize_scale,
+                'target_torso_length': self.smoothing.target_torso_length,
+                'enable_root_stabilization': self.smoothing.enable_root_stabilization,
+                'max_horizontal_velocity': self.smoothing.max_horizontal_velocity,
+                'max_vertical_velocity': self.smoothing.max_vertical_velocity,
+                'recenter_alpha': self.smoothing.recenter_alpha,
+                'ground_clamp': self.smoothing.ground_clamp,
+                'ground_tolerance': self.smoothing.ground_tolerance,
+                'airborne_threshold': self.smoothing.airborne_threshold,
+                'enable_trajectory_smoothing': self.smoothing.enable_trajectory_smoothing,
+                'trajectory_window': self.smoothing.trajectory_window,
+                'keypoint_confidence_threshold': self.smoothing.keypoint_confidence_threshold,
             },
             'output': {
                 'base_dir': self.output.base_dir,

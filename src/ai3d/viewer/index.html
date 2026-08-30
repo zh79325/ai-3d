@@ -344,19 +344,25 @@
             flex: 1;
             position: relative;
             overflow: hidden;
+            min-width: 0;
+            min-height: 0;
         }
         
-        .preview-content canvas {
-            width: 100%;
-            height: 100%;
-            display: block;
-        }
-        
+        /* canvas 与 video 同层铺满预览区，由 JS 把绘制缓冲对齐到容器实际像素 */
+        .preview-content canvas,
         .preview-content video {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
             height: 100%;
-            object-fit: contain;
             display: block;
+        }
+        
+        /* 视频按预览区等比缩放、完整显示不裁切 */
+        .preview-content video {
+            object-fit: contain;
+            background: #000;
         }
         
         .btn-play-toggle {
@@ -592,19 +598,43 @@
         function initCanvasOverlay() {
             const canvasOverlay = document.getElementById('canvas-overlay');
             
-            resizeCanvas(canvasOverlay);
             ctxOverlay = canvasOverlay.getContext('2d');
+            fitCanvas2D(canvasOverlay);
             
-            window.addEventListener('resize', () => {
-                resizeCanvas(canvasOverlay);
+            observeResize(canvasOverlay.parentElement, () => {
+                fitCanvas2D(canvasOverlay);
                 if (animationData) renderAllViews(currentFrame);
             });
         }
         
-        function resizeCanvas(canvas) {
+        // 监听容器尺寸变化：侧边栏/步骤面板改变预览区大小时不会触发 window resize，
+        // 所以以 ResizeObserver 为主，window resize 只做兼容兜底（兼顾 devicePixelRatio 变化）
+        function observeResize(element, handler) {
+            if (typeof ResizeObserver === 'function') {
+                new ResizeObserver(handler).observe(element);
+            }
+            window.addEventListener('resize', handler);
+        }
+        
+        // 把 2D canvas 的绘制缓冲对齐到容器实际像素（含 devicePixelRatio）
+        // 只靠 CSS 100% 会把固定尺寸的缓冲拉伸成模糊/变形的画面
+        function fitCanvas2D(canvas) {
             const parent = canvas.parentElement;
-            canvas.width = parent.clientWidth;
-            canvas.height = parent.clientHeight;
+            const cssW = parent.clientWidth;
+            const cssH = parent.clientHeight;
+            // 容器隐藏时尺寸为 0，写进去会让后续缩放除法出 NaN
+            if (cssW === 0 || cssH === 0) return;
+            
+            const dpr = window.devicePixelRatio || 1;
+            const w = Math.round(cssW * dpr);
+            const h = Math.round(cssH * dpr);
+            if (canvas.width === w && canvas.height === h) return;
+            
+            canvas.width = w;
+            canvas.height = h;
+            // 缩放交给 transform，绘制代码一律按 CSS 像素坐标写
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         }
         
         // 初始化3D场景
@@ -612,21 +642,20 @@
             const container = document.getElementById('preview-3d');
             const canvas = document.getElementById('canvas-3d');
             
-            resizeCanvas(canvas);
-            
             scene3D = new THREE.Scene();
             scene3D.background = new THREE.Color(0x1a1a1a);
             
-            camera3D = new THREE.PerspectiveCamera(75, canvas.width / canvas.height, 0.1, 1000);
-            camera3D.position.set(0, 0, 5);
+            camera3D = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+            // 后端已把骨架归一化到真实人体尺度(米)、脚踩 y=0 的网格，视角对准人体中段
+            camera3D.position.set(0, 1.2, 4);
             
             renderer3D = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-            renderer3D.setSize(canvas.width, canvas.height);
-            renderer3D.setPixelRatio(window.devicePixelRatio);
             
             controls3D = new THREE.OrbitControls(camera3D, canvas);
             controls3D.enableDamping = true;
             controls3D.dampingFactor = 0.05;
+            controls3D.target.set(0, 0.9, 0);
+            controls3D.update();
             
             const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
             scene3D.add(gridHelper);
@@ -634,7 +663,24 @@
             const axesHelper = new THREE.AxesHelper(2);
             scene3D.add(axesHelper);
             
+            fit3DToContainer();
+            observeResize(container, fit3DToContainer);
+            
             animate3D();
+        }
+        
+        // 渲染尺寸与相机宽高比跟随预览区，不跟会把 3D 画面横向拉伸
+        function fit3DToContainer() {
+            const parent = renderer3D.domElement.parentElement;
+            const w = parent.clientWidth;
+            const h = parent.clientHeight;
+            if (w === 0 || h === 0) return;
+            
+            renderer3D.setPixelRatio(window.devicePixelRatio || 1);
+            // 第三个参数 false: 不写内联尺寸，canvas 展示尺寸仍由 CSS 的 100% 控制
+            renderer3D.setSize(w, h, false);
+            camera3D.aspect = w / h;
+            camera3D.updateProjectionMatrix();
         }
         
         function animate3D() {
@@ -935,8 +981,10 @@
             const ctx = ctxOverlay;
             if (!ctx) return;
             
-            const w = canvas.width;
-            const h = canvas.height;
+            // 绘制缓冲已按 devicePixelRatio 做了 transform，这里一律用 CSS 像素尺寸
+            const w = canvas.clientWidth;
+            const h = canvas.clientHeight;
+            if (w === 0 || h === 0) return;
             
             // 清空画布
             ctx.clearRect(0, 0, w, h);

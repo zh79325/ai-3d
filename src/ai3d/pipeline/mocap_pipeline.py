@@ -10,9 +10,12 @@ import numpy as np
 from ai3d.core.pose_estimator import PoseEstimator
 from ai3d.core.dwpose_estimator import DWPoseEstimator
 from ai3d.core.depth_estimator import DepthEstimator
+from ai3d.core.kinematic_constraints import BoneLengthConstraint
+from ai3d.core.root_stabilizer import RootStabilizer, estimate_metric_scale
 from ai3d.utils.video_io import VideoReader
 from ai3d.utils.coordinate import convert_skeleton_to_3d
-from ai3d.models.skeleton import Skeleton
+from ai3d.utils.smoothing import KeypointSmoother, TrajectorySmoother
+from ai3d.models.skeleton import PoseKeypoints, Skeleton
 from ai3d.config import Config
 from ai3d.pipeline.background_remover import BackgroundRemover
 from ai3d.pipeline.video_annotator import VideoAnnotator
@@ -110,6 +113,7 @@ class MotionCapturePipeline:
             tracker.skip("annotate_video", "未启用标注视频")
         if self.depth_estimator is None:
             tracker.skip("depth_convert", "深度估计器不可用")
+            tracker.skip("smooth_3d", "无 3D 数据")
         
         # 步骤1: 读取视频
         tracker.start("video_read", 1, "正在加载视频...")
@@ -183,6 +187,19 @@ class MotionCapturePipeline:
             total_frames = len(frames)
             tracker.start("pose_estimate", total_frames, "正在进行姿态估计...")
             
+            # 2D 时序平滑放在这里而不是姿态估计之后：标注视频在同一个循环里写出，
+            # 让它和 3D 重建吃到同一份平滑结果，两个窗口不会一个抖一个不抖
+            smoother = None
+            if self.config.smoothing.enable_2d_smoothing:
+                smoother = KeypointSmoother(
+                    num_keypoints=len(self.pose_estimator.keypoint_names),
+                    fps=reader.fps,
+                    min_cutoff=self.config.smoothing.min_cutoff,
+                    beta=self.config.smoothing.beta,
+                    d_cutoff=self.config.smoothing.d_cutoff,
+                    confidence_threshold=self.config.smoothing.keypoint_confidence_threshold,
+                )
+            
             # 分批处理以支持进度上报
             skeletons_2d = []
             batch_size = 10
@@ -191,6 +208,13 @@ class MotionCapturePipeline:
                 batch_skeletons, batch_results = self.pose_estimator.estimate_batch(
                     batch, return_results=True
                 )
+                
+                if smoother is not None:
+                    for j, skeleton in enumerate(batch_skeletons):
+                        self._smooth_skeleton_2d(
+                            smoother, skeleton, batch_results[j], i + j, reader.fps
+                        )
+                
                 skeletons_2d.extend(batch_skeletons)
                 
                 # 关键点直接叠加到底图上并写入标注视频,坐标与原视频像素严格一致
@@ -225,7 +249,10 @@ class MotionCapturePipeline:
             if self.depth_estimator:
                 tracker.start("depth_convert", total_frames, "正在进行 3D 坐标转换...")
                 print("正在进行 3D 坐标转换...")
+                # 上一帧的躯干深度：整帧深度都失效时用它兜底，避免退回像素坐标
+                last_root_depth = None
                 for i, (frame, skeleton) in enumerate(zip(frames, skeletons_2d)):
+                    skeleton_3d = None
                     if skeleton is not None:
                         # 估计深度图
                         depth_map = self.depth_estimator.estimate_depth(frame)
@@ -248,21 +275,26 @@ class MotionCapturePipeline:
                                 skeleton_dict,
                                 depth_map,
                                 reader.width,
-                                reader.height
+                                reader.height,
+                                confidence_threshold=self.config.smoothing.keypoint_confidence_threshold,
+                                max_depth_deviation=self.config.smoothing.max_depth_deviation,
+                                patch_radius=self.config.smoothing.depth_patch_radius,
+                                fallback_depth=last_root_depth,
                             )
-                            skeletons_3d.append(skeleton_3d)
-                        else:
-                            skeletons_3d.append(None)
-                    else:
-                        skeletons_3d.append(None)
+                            if skeleton_3d is not None:
+                                last_root_depth = skeleton_3d.get('root_depth', last_root_depth)
+                    
+                    skeletons_3d.append(skeleton_3d)
                     
                     if (i + 1) % 10 == 0:
                         tracker.update("depth_convert", i + 1,
                                        f"3D转换中 {i+1}/{total_frames} 帧...")
                 
                 tracker.finish("depth_convert", f"3D转换完成 ({total_frames}帧)")
-                final_skeletons = skeletons_3d
                 print("✅ 3D 坐标转换完成")
+                
+                # 步骤4.5: 3D 平滑与稳定化
+                final_skeletons = self._stabilize_3d(skeletons_3d, reader.fps, tracker)
             else:
                 final_skeletons = skeletons_2d
             
@@ -290,6 +322,134 @@ class MotionCapturePipeline:
         print(f"✅ 处理完成! 有效姿态帧: {len(valid_frames)}")
         return result
     
+    def _smooth_skeleton_2d(self, smoother: KeypointSmoother, skeleton, pose_result,
+                            frame_idx: int, fps: float) -> None:
+        """就地平滑一帧的 2D 关键点
+
+        平滑结果同时写回 pose_result，让标注视频与 3D 重建吃同一份坐标。
+        用帧号换算时间戳而不是靠调用次数递推，中间的丢帧（未检测到人）不会被当成连续帧。
+        """
+        if skeleton is None or not skeleton.joints:
+            return
+
+        points = np.array([j['position'][:2] for j in skeleton.joints], dtype=float)
+        if points.shape[0] != smoother.num_keypoints:
+            return
+        confidences = np.array(
+            [float(j.get('confidence', 1.0)) for j in skeleton.joints], dtype=float
+        )
+
+        timestamp = frame_idx / fps if fps and fps > 0 else None
+        smoothed = smoother.smooth(points, confidences, timestamp)
+
+        for joint, (x, y) in zip(skeleton.joints, smoothed):
+            joint['position'][0] = float(x)
+            joint['position'][1] = float(y)
+
+        # YOLO 后端的 raw_result 是 Ultralytics 的 Results，不可改写，只同步 PoseKeypoints
+        if isinstance(pose_result, PoseKeypoints) and pose_result.keypoints is not None:
+            pose_result.keypoints = smoothed.astype(np.float32)
+
+    def _stabilize_3d(self, skeletons_3d: List[Optional[dict]], fps: float, tracker) -> List[Optional[dict]]:
+        """3D 侧稳定化: 骨长约束 -> 根节点稳定化 -> 轨迹中值滤波
+
+        这三步都要看整段序列（骨长目标取全视频中位数、地面高度取脚部百分位），
+        所以放在深度转换全部结束之后统一处理，而不是逐帧做。
+        """
+        cfg = self.config.smoothing
+        if not (cfg.enable_bone_constraint or cfg.enable_root_stabilization
+                or cfg.enable_trajectory_smoothing or cfg.normalize_scale):
+            tracker.skip("smooth_3d", "3D 平滑未启用")
+            return skeletons_3d
+
+        if not any(s is not None for s in skeletons_3d):
+            tracker.skip("smooth_3d", "无有效 3D 姿态")
+            return skeletons_3d
+
+        tracker.start("smooth_3d", 4, "正在归一化尺度...")
+
+        sequence: List[Optional[np.ndarray]] = []
+        confidences: List[Optional[np.ndarray]] = []
+        for skeleton in skeletons_3d:
+            if skeleton is None or not skeleton.get('joints'):
+                sequence.append(None)
+                confidences.append(None)
+                continue
+            joints = skeleton['joints']
+            sequence.append(np.array([j['position'] for j in joints], dtype=float))
+            confidences.append(
+                np.array([float(j.get('confidence', 1.0)) for j in joints], dtype=float)
+            )
+
+        # 尺度归一化必须排在最前：后面的骨长误差、m/s 限速、腾空阈值都按真人尺度标定
+        if cfg.normalize_scale:
+            scale = estimate_metric_scale(
+                sequence,
+                self.keypoint_format,
+                target_torso_length=cfg.target_torso_length,
+                confidences=confidences,
+                confidence_threshold=cfg.keypoint_confidence_threshold,
+            )
+            if abs(scale - 1.0) > 1e-6:
+                sequence = [None if p is None else p * scale for p in sequence]
+                print(f"✅ 尺度归一化: 缩放 {scale:.3f}（躯干对齐到 {cfg.target_torso_length}m）")
+
+        tracker.update("smooth_3d", 1, "正在优化骨长...")
+
+        if cfg.enable_bone_constraint:
+            constraint = BoneLengthConstraint(
+                self.keypoint_format,
+                iterations=cfg.bone_constraint_iterations,
+                confidence_threshold=cfg.keypoint_confidence_threshold,
+            )
+            if constraint.fit(sequence, confidences):
+                before = constraint.mean_length_error(sequence)
+                sequence = [
+                    None if points is None else constraint.apply(points, confidences[i])
+                    for i, points in enumerate(sequence)
+                ]
+                after = constraint.mean_length_error(sequence)
+                print(f"✅ 骨长约束: 平均骨长误差 {before:.3f}m -> {after:.3f}m")
+
+        tracker.update("smooth_3d", 2, "正在稳定根节点...")
+
+        if cfg.enable_root_stabilization:
+            try:
+                stabilizer = RootStabilizer(
+                    self.keypoint_format,
+                    fps=fps,
+                    max_horizontal_velocity=cfg.max_horizontal_velocity,
+                    max_vertical_velocity=cfg.max_vertical_velocity,
+                    recenter_alpha=cfg.recenter_alpha,
+                    ground_clamp=cfg.ground_clamp,
+                    ground_tolerance=cfg.ground_tolerance,
+                    airborne_threshold=cfg.airborne_threshold,
+                    confidence_threshold=cfg.keypoint_confidence_threshold,
+                )
+                ground_y = stabilizer.fit_ground(sequence, confidences)
+                sequence = [
+                    None if points is None else stabilizer.stabilize(points, i)
+                    for i, points in enumerate(sequence)
+                ]
+                print(f"✅ 根节点稳定化: 地面 y={ground_y:.3f}")
+            except ValueError as e:
+                print(f"⚠️  根节点稳定化跳过: {e}")
+
+        tracker.update("smooth_3d", 3, "正在做轨迹滤波...")
+
+        if cfg.enable_trajectory_smoothing:
+            sequence = TrajectorySmoother(cfg.trajectory_window).smooth(sequence)
+
+        for skeleton, points in zip(skeletons_3d, sequence):
+            if skeleton is None or points is None:
+                continue
+            for joint, pos in zip(skeleton['joints'], points):
+                joint['position'] = [float(pos[0]), float(pos[1]), float(pos[2])]
+
+        tracker.finish("smooth_3d", "3D 平滑完成")
+        print("✅ 3D 平滑与稳定化完成")
+        return skeletons_3d
+
     def get_skeleton_at_frame(self, skeletons: List[Optional[Skeleton]], frame_index: int) -> Optional[Skeleton]:
         """获取指定帧的骨骼数据"""
         if 0 <= frame_index < len(skeletons):

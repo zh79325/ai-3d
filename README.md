@@ -107,6 +107,8 @@ ai-3d/
 │   │   ├── dwpose_estimator.py  # DWPose 133 点姿态估计(默认)
 │   │   ├── pose_estimator.py    # YOLO 17 点姿态估计(备用)
 │   │   ├── depth_estimator.py   # 深度估计
+│   │   ├── kinematic_constraints.py  # 骨长恒定约束
+│   │   ├── root_stabilizer.py   # 尺度归一化 + 根节点稳定化 + 地面约束
 │   │   ├── weapon_binder.py     # 武器绑定
 │   │   └── physics_solver.py    # 物理解算
 │   ├── models/            # 数据模型
@@ -120,8 +122,8 @@ ai-3d/
 │   │   └── export_pipeline.py     # 导出管线
 │   ├── utils/             # 工具函数
 │   │   ├── video_io.py          # 视频读写
-│   │   ├── smoothing.py         # 平滑滤波
-│   │   └── coordinate.py        # 坐标转换
+│   │   ├── smoothing.py         # OneEuro 时序平滑 / 轨迹中值滤波
+│   │   └── coordinate.py        # 2D->3D 反投影(深度块采样 + 躯干锚定)
 │   └── config/            # 配置管理
 │       ├── default.yaml         # 默认配置
 │       └── loader.py            # 配置加载器
@@ -163,6 +165,7 @@ def generate_game_asset(video_path):
 - ✅ **DWPose 全身关键点**: COCO-WholeBody 133 点,含手部 42 点与面部 68 点
 - ✅ **YOLO26 驱动**: 端到端目标检测、实例分割与备用姿态后端
 - ✅ **深度感知**: 单目深度估计 + 关键点深度推算
+- ✅ **3D 平滑稳定**: OneEuro 时序滤波 + 骨长约束 + 尺度归一化 + 根节点稳定化(见 `SmoothingConfig`)
 - ✅ **武器绑定**: 刚体道具自动识别与空间绑定
 - ✅ **物理修正**: 重力、碰撞、脚部接地自动优化
 - ✅ **多格式导出**: 支持 FBX、BVH、GLTF 等游戏引擎格式
