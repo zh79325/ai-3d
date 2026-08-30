@@ -18,7 +18,6 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
 import os
-import tempfile
 import shutil
 from pathlib import Path
 
@@ -245,26 +244,34 @@ async def get_processing_status_endpoint():
 
 @router.post("/process-video")
 async def process_video_endpoint(file: UploadFile = File(...)):
-    """上传并处理视频文件，返回任务ID"""
+    """上传并处理视频文件，返回任务ID
+
+    本次任务的全部产物（原视频副本、标注视频、animation_data.json）
+    都写入 output/<task_id>/
+    """
     import threading
+    from ai3d.config import Config
     
     # 创建任务
     task_id = create_task(file.filename)
     
-    # 保存上传的视频到临时文件
-    temp_dir = tempfile.mkdtemp(prefix=f"ai3d_{task_id}_")
-    temp_video_path = os.path.join(temp_dir, file.filename)
+    # 任务输出目录（项目根 output/<task_id>/）
+    config = Config()
+    task_dir = config.output.task_dir(task_id)
+    # 只取扩展名，避免上传文件名带路径分隔符
+    suffix = Path(file.filename or "").suffix or ".mp4"
+    saved_video_path = str(task_dir / f"{config.output.source_video_stem}{suffix}")
     
     try:
-        with open(temp_video_path, "wb") as buffer:
+        with open(saved_video_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
         # 更新任务状态为处理中
         update_task(task_id, {
             "status": "processing",
             "message": f"正在处理 {file.filename}...",
-            "temp_dir": temp_dir,
-            "video_path": temp_video_path
+            "output_dir": str(task_dir),
+            "video_path": saved_video_path
         })
         
         # 在后台线程中处理视频
@@ -272,13 +279,14 @@ async def process_video_endpoint(file: UploadFile = File(...)):
             try:
                 from scripts.launch_viewer import process_video_to_json
                 
-                json_path = process_video_to_json(temp_video_path, output_dir=temp_dir, task_id=task_id)
+                json_path = process_video_to_json(
+                    saved_video_path, output_dir=str(task_dir), task_id=task_id
+                )
                 
                 if json_path:
                     data = load_animation_from_json(json_path)
                     task = get_task(task_id) or {}
                     
-                    # 保留视频文件供前端播放使用，不再删除
                     update_task(task_id, {
                         "status": "completed",
                         "current_frame": data["total_frames"],
@@ -287,8 +295,9 @@ async def process_video_endpoint(file: UploadFile = File(...)):
                         "message": "处理完成！",
                         "animation_data": data,
                         "json_path": json_path,
-                        "video_path": temp_video_path,  # 保存视频路径供前端流式传输
-                        # 标注视频由 pipeline 写入 temp_dir，launch_viewer 已回写该字段
+                        "output_dir": str(task_dir),
+                        "video_path": saved_video_path,  # 保留原视频供前端流式传输
+                        # 标注视频由 pipeline 写入 task_dir，launch_viewer 已回写该字段
                         "annotated_video_path": task.get("annotated_video_path")
                     })
                 else:
@@ -312,13 +321,11 @@ async def process_video_endpoint(file: UploadFile = File(...)):
             "task_id": task_id,
             "status": "processing",
             "filename": file.filename,
+            "output_dir": str(task_dir),
             "message": f"Started processing {file.filename}"
         }
         
     except Exception as e:
-        # 清理临时目录
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

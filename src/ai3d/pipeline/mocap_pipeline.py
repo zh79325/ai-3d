@@ -46,19 +46,23 @@ class MotionCapturePipeline:
                 print(f"⚠️  深度估计器加载失败: {e}")
                 print("   将仅使用 2D 姿态估计")
     
-    def process_video(self, video_path: str, output_dir: str = "./output", progress_callback=None) -> dict:
+    def process_video(self, video_path: str, output_dir: Optional[str] = None, progress_callback=None) -> dict:
         """
         处理视频文件,提取姿态数据
         
         Args:
             video_path: 输入视频路径
-            output_dir: 输出目录
+            output_dir: 输出目录,为 None 时使用 config.output.base_dir
             progress_callback: 进度回调函数，签名为 callback(step_name, current, total, message)
             
         Returns:
             包含处理结果的字典
         """
         print(f"开始处理视频: {video_path}")
+        
+        if output_dir is None:
+            output_dir = self.config.output.base_dir
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         
         # 定义辅助函数用于上报进度
         def report_progress(step_name, current, total, message):
@@ -218,6 +222,7 @@ class MotionCapturePipeline:
         
         result = {
             "video_path": video_path,
+            "output_dir": str(output_dir),
             "annotated_video_path": annotated_video_path,
             "total_frames": len(frames),
             "valid_frames": len(valid_frames),

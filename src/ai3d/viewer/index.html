@@ -292,12 +292,12 @@
             background: #0d0d0d;
         }
         
-        /* 三窗口网格 */
+        /* 双窗口网格 */
         .preview-grid {
             flex: 1;
             min-height: 0;
             display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
+            grid-template-columns: 1fr 1fr;
             gap: 2px;
             background: #333;
         }
@@ -428,7 +428,7 @@
         
         <!-- 右侧预览区域 -->
         <div class="preview-area">
-            <!-- 三窗口预览网格 -->
+            <!-- 双窗口预览网格 -->
             <div class="preview-grid">
                 <!-- 窗口1: 原视频 + YOLO 标注（后端烧录） -->
                 <div class="preview-window">
@@ -438,15 +438,7 @@
                     </div>
                 </div>
                 
-                <!-- 窗口2: 纯骨骼2D -->
-                <div class="preview-window">
-                    <div class="preview-header"> 2D 骨骼检测</div>
-                    <div class="preview-content" id="preview-skeleton-2d">
-                        <canvas id="canvas-2d"></canvas>
-                    </div>
-                </div>
-                
-                <!-- 窗口3: 3D重建 -->
+                <!-- 窗口2: 3D重建 -->
                 <div class="preview-window">
                     <div class="preview-header">🌐 3D 深度重建</div>
                     <div class="preview-content" id="preview-3d">
@@ -491,9 +483,8 @@
         
         // Canvas 上下文
         let ctxOverlay = null;
-        let ctx2D = null;
         
-        // Three.js 场景（用于窗口3）
+        // Three.js 场景（用于窗口2）
         let scene3D, camera3D, renderer3D, controls3D;
         let skeletonMeshes3D = [];
         
@@ -512,26 +503,21 @@
         
         // ========== 初始化 ==========
         function init() {
-            initCanvas2D();
+            initCanvasOverlay();
             initCanvas3D();
             setupEventListeners();
             loadExistingTasks();
         }
         
-        // 初始化2D Canvas
-        function initCanvas2D() {
+        // 初始化窗口1的叠加 Canvas
+        function initCanvasOverlay() {
             const canvasOverlay = document.getElementById('canvas-overlay');
-            const canvas2D = document.getElementById('canvas-2d');
             
             resizeCanvas(canvasOverlay);
-            resizeCanvas(canvas2D);
-            
             ctxOverlay = canvasOverlay.getContext('2d');
-            ctx2D = canvas2D.getContext('2d');
             
             window.addEventListener('resize', () => {
                 resizeCanvas(canvasOverlay);
-                resizeCanvas(canvas2D);
                 if (animationData) renderAllViews(currentFrame);
             });
         }
@@ -875,7 +861,6 @@
             if (!frame) return;
             
             renderOverlayView(frameIndex, frame);
-            render2DView(frame);
             render3DView(frame);
             
             currentFrame = frameIndex;
@@ -921,29 +906,13 @@
             }
             
             // 绘制骨骼叠加层
-            drawSkeletonOnCanvas(ctx, frame, w, h, true);
-        }
-        
-        // 窗口2: 纯2D骨骼
-        function render2DView(frame) {
-            const canvas = document.getElementById('canvas-2d');
-            const ctx = ctx2D;
-            if (!ctx) return;
-            
-            const w = canvas.width;
-            const h = canvas.height;
-            
-            ctx.clearRect(0, 0, w, h);
-            ctx.fillStyle = '#1a1a1a';
-            ctx.fillRect(0, 0, w, h);
-            
-            drawSkeletonOnCanvas(ctx, frame, w, h, false);
+            drawSkeletonOnCanvas(ctx, frame, w, h);
         }
         
         // 在Canvas上绘制骨骼
         // 坐标统一按“视频原始分辨率 → canvas contain 居中”映射，
         // 不再用包围盒自适应缩放（那会把骨骼拉伸到整张画布、与视频错位）
-        function drawSkeletonOnCanvas(ctx, frame, canvasW, canvasH, withBackground) {
+        function drawSkeletonOnCanvas(ctx, frame, canvasW, canvasH) {
             const joints = frame.joints;
             if (!joints || joints.length === 0) return;
             
@@ -984,7 +953,7 @@
             });
         }
         
-        // 窗口3: 3D重建
+        // 窗口2: 3D重建
         function render3DView(frame) {
             skeletonMeshes3D.forEach(mesh => scene3D.remove(mesh));
             skeletonMeshes3D = [];
@@ -1074,7 +1043,7 @@
             
             playInterval = setInterval(() => {
                 if (useAnnotatedVideo && videoElement && videoElement.readyState >= 2) {
-                    // 以标注视频的播放进度为准，反推当前帧，保证三个窗口同步
+                    // 以标注视频的播放进度为准，反推当前帧，保证两个窗口同步
                     if (videoElement.ended) {
                         videoElement.currentTime = 0;
                         videoElement.play().catch(() => {});

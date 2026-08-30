@@ -3,8 +3,20 @@ Configuration management for AI 3D Animation Generator.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+# 项目根目录（src/ai3d/config.py -> ai3d -> src -> 项目根）
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def default_output_dir() -> str:
+    """输出根目录：默认项目根下的 output/，可用环境变量 AI3D_OUTPUT_DIR 覆盖"""
+    env_dir = os.environ.get("AI3D_OUTPUT_DIR")
+    if env_dir:
+        return str(Path(env_dir).expanduser().resolve())
+    return str(PROJECT_ROOT / "output")
 
 
 @dataclass
@@ -33,10 +45,25 @@ class PipelineConfig:
 
 
 @dataclass
+class OutputConfig:
+    """输出目录配置：每个任务在 base_dir 下独占一个子目录，产物全部落在其中"""
+    base_dir: str = field(default_factory=default_output_dir)
+    animation_json_name: str = "animation_data.json"  # 骨骼动画数据文件名
+    source_video_stem: str = "source"  # 原视频副本的文件名（不含扩展名）
+    keep_source_video: bool = True  # 是否把输入视频留在任务目录
+
+    def task_dir(self, task_id: str, create: bool = True) -> Path:
+        """返回指定任务的输出目录，create=True 时自动创建"""
+        path = Path(self.base_dir) / task_id
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+
+@dataclass
 class ExportConfig:
-    """导出配置"""
+    """导出配置（输出目录见 OutputConfig）"""
     output_format: str = "fbx"  # 'fbx', 'bvh', 'gltf'
-    output_dir: str = "./output"
 
 
 class Config:
@@ -45,6 +72,7 @@ class Config:
     def __init__(self):
         self.model = ModelConfig()
         self.pipeline = PipelineConfig()
+        self.output = OutputConfig()
         self.export = ExportConfig()
         
     @classmethod
@@ -66,6 +94,11 @@ class Config:
             for key, value in data['pipeline'].items():
                 if hasattr(config.pipeline, key):
                     setattr(config.pipeline, key, value)
+                    
+        if 'output' in data:
+            for key, value in data['output'].items():
+                if hasattr(config.output, key):
+                    setattr(config.output, key, value)
                     
         if 'export' in data:
             for key, value in data['export'].items():
@@ -98,9 +131,14 @@ class Config:
                 'annotate_mask_alpha': self.pipeline.annotate_mask_alpha,
                 'annotated_video_name': self.pipeline.annotated_video_name,
             },
+            'output': {
+                'base_dir': self.output.base_dir,
+                'animation_json_name': self.output.animation_json_name,
+                'source_video_stem': self.output.source_video_stem,
+                'keep_source_video': self.output.keep_source_video,
+            },
             'export': {
                 'output_format': self.export.output_format,
-                'output_dir': self.export.output_dir,
             }
         }
         

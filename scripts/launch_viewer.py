@@ -13,10 +13,28 @@ import json
 from pathlib import Path
 
 # 添加项目根目录到路径
-project_root = Path(__file__).parent.parent.parent
+project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from ai3d import MotionCapturePipeline
+
+
+def resolve_output_dir(config, output_dir: str = None, task_id: str = None) -> Path:
+    """确定并创建本次处理的输出目录
+
+    优先级: 显式传入的 output_dir > config.output.task_dir(task_id) > 时间戳目录
+    """
+    if output_dir is not None:
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    if task_id:
+        return config.output.task_dir(task_id)
+
+    # 无任务 ID 时（如 CLI 直接跑）用时间戳目录，避免多次运行互相覆盖
+    from datetime import datetime
+    return config.output.task_dir(datetime.now().strftime("%Y%m%d-%H%M%S"))
 
 
 def process_video_to_json(video_path: str, output_dir: str = None, task_id: str = None) -> str:
@@ -24,8 +42,8 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     
     Args:
         video_path: 视频文件路径
-        output_dir: 输出目录
-        task_id: 可选的任务ID，用于更新任务状态
+        output_dir: 输出目录，为 None 时按 config.output 解析（项目根 output/<task_id>/）
+        task_id: 可选的任务ID，用于更新任务状态并作为输出子目录名
     """
     
     print(f" 处理视频: {video_path}")
@@ -137,11 +155,8 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     config.pipeline.remove_background = True  # 启用背景移除
 
     # 输出目录（标注视频与 JSON 都放这里）
-    if output_dir is None:
-        output_dir = project_root / "output"
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = resolve_output_dir(config, output_dir=output_dir, task_id=task_id)
+    print(f"📁 输出目录: {output_dir}")
 
     pipeline = MotionCapturePipeline(config)
     result = pipeline.process_video(
@@ -226,7 +241,7 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
         'skeletons': skeletons_data
     }
     
-    json_path = output_dir / "animation_data.json"
+    json_path = output_dir / config.output.animation_json_name
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(animation_data, f, ensure_ascii=False, indent=2)
     
@@ -252,6 +267,7 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
             "message": "处理完成！",
             "animation_data": animation_data,
             "json_path": str(json_path),
+            "output_dir": str(output_dir),
             "annotated_video_path": result.get('annotated_video_path')
         })
     
