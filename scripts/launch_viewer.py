@@ -50,6 +50,8 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     
     # 初始化处理状态（兼容旧接口）
     from ai3d.viewer import set_processing_status, update_task
+    from ai3d.pipeline.progress import ProgressTracker
+    
     set_processing_status({
         "is_processing": True,
         "current_frame": 0,
@@ -68,86 +70,24 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
             "progress_percent": 0.0
         })
     
-    # 定义进度回调函数，将pipeline的细粒度进度映射到前端可理解的步骤
-    def progress_callback(step_name, current, total, message):
-        # 计算总体进度百分比（基于步骤权重）
-        step_weights = {
-            "video_read": 5,      # 5%
-            "frame_extract": 10,  # 10%
-            "bg_remove": 20,      # 20% (背景移除)
-            "pose_estimate": 40,  # 40% (最耗时)
-            "depth_convert": 20,  # 20%
-            "validation": 3,      # 3%
-            "complete": 2         # 2%
+    # 进度回调：直接透传 tracker 快照。
+    # 步骤清单、权重、label 全部由 ai3d.pipeline.progress 单一定义，
+    # 此处不再重复维护任何步骤表，避免与前端/pipeline 不同步
+    def on_progress(snapshot):
+        payload = {
+            "current_frame": snapshot["current_frame"],
+            "total_frames": snapshot["total_frames"],
+            "progress_percent": snapshot["overall_percent"],
+            "message": snapshot["message"],
+            "current_step": snapshot["current_step"],
+            "current_step_label": snapshot["current_step_label"],
+            "steps": snapshot["steps"],
         }
-        
-        weight = step_weights.get(step_name, 0)
-        
-        # 计算该步骤内的进度
-        if total > 0:
-            step_progress_val = (current / total) * weight
-        else:
-            step_progress_val = weight
-        
-        # 计算累计进度
-        cumulative_weights = {
-            "video_read": 0,
-            "frame_extract": 5,
-            "bg_remove": 15,
-            "pose_estimate": 35,
-            "depth_convert": 75,
-            "validation": 95,
-            "complete": 98
-        }
-        
-        base_progress = cumulative_weights.get(step_name, 0)
-        overall_progress = min(base_progress + step_progress_val, 100.0)
-        
-        # 构建多步骤进度数据结构
-        step_progress_data = {}
-        for sname in ["video_read", "frame_extract", "bg_remove", "pose_estimate", "depth_convert", "validation"]:
-            sbase = cumulative_weights.get(sname, 0)
-            sweight = step_weights.get(sname, 0)
-            
-            if sname == step_name:
-                # 当前正在执行的步骤
-                percent = int((current / total * 100)) if total > 0 else 0
-                step_progress_data[sname] = {
-                    "status": "processing",
-                    "current": current,
-                    "total": total,
-                    "percent": percent,
-                    "message": message
-                }
-            elif sbase < base_progress or (sbase == base_progress and step_name != "complete"):
-                # 已完成的步骤
-                step_progress_data[sname] = {
-                    "status": "completed",
-                    "current": 100 if sweight > 0 else 0,
-                    "total": 100,
-                    "percent": 100,
-                    "message": ""
-                }
-            # 尚未开始的步骤不加入字典
-        
-        # 更新全局状态（兼容旧接口）
-        set_processing_status({
-            "current_frame": current,
-            "total_frames": total,
-            "progress_percent": round(overall_progress, 1),
-            "message": message,
-            "step_progress": step_progress_data
-        })
-        
-        # 如果提供了task_id，更新任务状态
+        set_processing_status(payload)
         if task_id:
-            update_task(task_id, {
-                "current_frame": current,
-                "total_frames": total,
-                "progress_percent": round(overall_progress, 1),
-                "message": message,
-                "step_progress": step_progress_data
-            })
+            update_task(task_id, payload)
+    
+    tracker = ProgressTracker(on_progress)
     
     # 处理视频获取3D骨骼数据，传入进度回调
     from ai3d.config import Config
@@ -162,11 +102,12 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     result = pipeline.process_video(
         video_path,
         output_dir=str(output_dir),
-        progress_callback=progress_callback
+        tracker=tracker
     )
     
     if not result['skeletons']:
         print("❌ 未检测到有效姿态")
+        tracker.fail("export_json", "未检测到有效姿态")
         set_processing_status({
             "is_processing": False,
             "message": "处理失败：未检测到有效姿态"
@@ -181,28 +122,15 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     # 准备JSON数据
     skeletons_data = []
     total_frames = len(result['skeletons'])
+    # 这一段属于 export_json 步骤，进度必须报在该步骤名下，
+    # 不能只改 message —— 否则会挂在上一个步骤（数据校验）的行上
+    tracker.start("export_json", total_frames, "正在序列化骨骼数据...")
     
     for i, skeleton in enumerate(result['skeletons']):
         # 每处理10帧更新一次进度
         if i % 10 == 0 or i == total_frames - 1:
-            progress = (i + 1) / total_frames * 100
-            
-            # 更新全局状态（兼容旧接口）
-            set_processing_status({
-                "current_frame": i + 1,
-                "total_frames": total_frames,
-                "progress_percent": round(progress, 1),
-                "message": f"正在处理第 {i+1}/{total_frames} 帧..."
-            })
-            
-            # 如果提供了task_id，更新任务状态
-            if task_id:
-                update_task(task_id, {
-                    "current_frame": i + 1,
-                    "total_frames": total_frames,
-                    "progress_percent": round(progress, 1),
-                    "message": f"正在处理第 {i+1}/{total_frames} 帧..."
-                })
+            tracker.update("export_json", i + 1,
+                           f"正在序列化第 {i+1}/{total_frames} 帧...")
         
         if skeleton is None:
             # 空帧也占位，保证数组下标与视频帧号一一对应
@@ -249,13 +177,17 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     print(f"   总帧数: {len(skeletons_data)}")
     print(f"   FPS: {result.get('fps', 30.0)}")
     
+    tracker.finish("export_json", f"已写入 {config.output.animation_json_name}")
+    final_steps = tracker.snapshot()["steps"]
+    
     # 标记处理完成
     set_processing_status({
         "is_processing": False,
         "current_frame": total_frames,
         "total_frames": total_frames,
         "progress_percent": 100.0,
-        "message": "处理完成！"
+        "message": "处理完成！",
+        "steps": final_steps
     })
     
     if task_id:
@@ -265,6 +197,8 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
             "total_frames": total_frames,
             "progress_percent": 100.0,
             "message": "处理完成！",
+            # 保留最终步骤快照，前端完成态直接渲染真实结果（含 skipped），不再一律打绿勾
+            "steps": final_steps,
             "animation_data": animation_data,
             "json_path": str(json_path),
             "output_dir": str(output_dir),

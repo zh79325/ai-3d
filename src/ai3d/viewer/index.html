@@ -186,6 +186,16 @@
             color: white;
         }
         
+        /* 按配置跳过的步骤：位置保留但明确变灰，区别于“已完成” */
+        .step-item.skipped {
+            opacity: 0.45;
+        }
+        
+        .step-item.skipped .step-icon {
+            background: #3a3a3a;
+            color: #777;
+        }
+        
         .step-label {
             flex: 1;
             white-space: nowrap;
@@ -689,13 +699,10 @@
                 const progressPercent = task.progress_percent || 0;
                 console.log(`Rendering task ${task.task_id}: progress=${progressPercent}%, status=${task.status}`);
                 
-                // 构建多步骤面板HTML
+                // 构建多步骤面板HTML（步骤清单与顺序全部来自后端快照）
                 let stepPanelHtml = '';
-                if (task.status === 'processing' && task.step_progress) {
-                    stepPanelHtml = renderStepProgressPanel(task.step_progress);
-                } else if (task.status === 'completed') {
-                    // 已完成任务显示所有步骤打勾
-                    stepPanelHtml = renderCompletedSteps();
+                if (task.steps && task.steps.length) {
+                    stepPanelHtml = renderStepProgressPanel(task.steps);
                 }
                 
                 return `
@@ -711,25 +718,15 @@
             `}).join('');
         }
         
-        // 定义处理步骤及其显示名称
-        const PIPELINE_STEPS = [
-            { key: 'video_read', label: '加载视频' },
-            { key: 'frame_extract', label: '提取帧' },
-            { key: 'bg_remove', label: '背景移除' },
-            { key: 'pose_estimate', label: '姿态估计' },
-            { key: 'depth_convert', label: '深度转换' },
-            { key: 'validation', label: '数据校验' }
-        ];
-        
-        // 渲染进行中的多步骤面板
-        function renderStepProgressPanel(stepProgress) {
+        // 渲染多步骤进度面板
+        // steps 由后端下发（ai3d/pipeline/progress.py 是唯一真值源），
+        // 含 key/label/order/status，包括尚未开始与被跳过的步骤，
+        // 因此列表长度与顺序自始至终恒定，每条进度归属明确
+        function renderStepProgressPanel(steps) {
+            const ordered = [...steps].sort((a, b) => (a.order || 0) - (b.order || 0));
             return `<div class="step-progress-panel">
-                ${PIPELINE_STEPS.map(step => {
-                    const stepData = stepProgress[step.key];
-                    if (!stepData) return ''; // 尚未开始的步骤不显示
-                    
-                    const { status, current, total, message } = stepData;
-                    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+                ${ordered.map(step => {
+                    const { status, percent, message, label } = step;
                     
                     let iconContent, itemClass;
                     if (status === 'completed') {
@@ -741,35 +738,29 @@
                     } else if (status === 'failed') {
                         iconContent = '✗';
                         itemClass = 'failed';
+                    } else if (status === 'skipped') {
+                        iconContent = '—';
+                        itemClass = 'skipped';
                     } else {
                         iconContent = '·';
                         itemClass = 'pending';
                     }
                     
-                    const progressBarHtml = (status === 'processing' && total > 0) ? 
+                    const isRunning = status === 'processing';
+                    const progressBarHtml = isRunning ?
                         `<div class="step-progress-bar-mini"><div class="step-progress-bar-mini-fill" style="width: ${percent}%"></div></div>` : '';
-                    const percentText = (status === 'processing' && total > 0) ? 
-                        `<span class="step-percent">${percent}%</span>` : '';
+                    const percentText = isRunning ? `<span class="step-percent">${percent}%</span>` : '';
+                    // 消息只跟在它所属的步骤后面，不会串到其他行
+                    const detail = (isRunning || status === 'skipped' || status === 'failed') && message ?
+                        ` — ${message}` : '';
                     
                     return `<div class="step-item ${itemClass}">
                         <span class="step-icon">${iconContent}</span>
-                        <span class="step-label">${step.label}${message && status === 'processing' ? ` — ${message}` : ''}</span>
+                        <span class="step-label">${label}${detail}</span>
                         ${progressBarHtml}
                         ${percentText}
                     </div>`;
                 }).join('')}
-            </div>`;
-        }
-        
-        // 渲染已完成的所有步骤
-        function renderCompletedSteps() {
-            return `<div class="step-progress-panel">
-                ${PIPELINE_STEPS.map(step => 
-                    `<div class="step-item completed">
-                        <span class="step-icon">✓</span>
-                        <span class="step-label">${step.label}</span>
-                    </div>`
-                ).join('')}
             </div>`;
         }
         
