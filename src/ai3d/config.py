@@ -11,7 +11,7 @@ from typing import Optional
 class ModelConfig:
     """YOLO26 模型配置"""
     pose_model: str = "./models/yolo26n-pose.pt"  # 使用本地模型
-    depth_model: str = "./models/yolo26n-depth.pt"
+    depth_model: str = "./models/yolo26n-depth.pt"  # 使用本地深度模型
     device: str = "cpu"  # 'cpu', 'cuda', 'mps'
     confidence_threshold: float = 0.5
     img_size: int = 640
@@ -22,6 +22,7 @@ class PipelineConfig:
     """处理管线配置"""
     use_depth: bool = True
     use_physics: bool = True
+    remove_background: bool = False  # 是否启用背景移除
     smooth_frames: int = 5  # 平滑滤波窗口大小
     fps_override: Optional[int] = None  # 如果为 None,使用视频原始 FPS
 
@@ -83,6 +84,7 @@ class Config:
             'pipeline': {
                 'use_depth': self.pipeline.use_depth,
                 'use_physics': self.pipeline.use_physics,
+                'remove_background': self.pipeline.remove_background,
                 'smooth_frames': self.pipeline.smooth_frames,
                 'fps_override': self.pipeline.fps_override,
             },

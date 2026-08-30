@@ -28,6 +28,50 @@ if first_frame:
     print(f"检测到 {len(first_frame.joints)} 个关键点")
 ```
 
+### 第二阶段:3D 姿态重建 (已完成 ✅)
+
+```python
+from ai3d import MotionCapturePipeline
+
+# 初始化管线 (启用深度估计)
+pipeline = MotionCapturePipeline()
+
+# 处理视频 (自动进行 2D->3D 转换)
+result = pipeline.process_video('input.mp4')
+
+# 访问 3D 骨骼数据
+skeletons = result['skeletons']
+if skeletons[0]:
+    # 检查数据结构
+    if isinstance(skeletons[0], dict):
+        joints = skeletons[0]['joints']
+    else:
+        joints = skeletons[0].joints
+    
+    for joint in joints[:3]:
+        pos = joint['position'] if isinstance(joint, dict) else joint.position
+        print(f"{joint['name'] if isinstance(joint, dict) else joint.name}: X={pos[0]:.2f}m, Y={pos[1]:.2f}m, Z={pos[2]:.2f}m")
+```
+
+### 第三阶段:Web预览器 (已完成 ✅)
+
+```python
+from ai3d import launch_viewer
+
+# 启动Web预览服务器
+launch_viewer('input.mp4', port=8765)
+
+# 然后在浏览器访问: http://localhost:8765/api/skeleton-viewer/viewer
+```
+
+**功能特性:**
+- 🎮 Three.js 3D渲染,支持旋转/缩放视角
+- ▶️ 播放控制:播放/暂停/上一帧/下一帧
+- 🔗 可集成到Electron或其他FastAPI项目
+- 📡 RESTful API提供骨骼数据
+
+详见 [VIEWER_INTEGRATION.md](docs/VIEWER_INTEGRATION.md)
+
 > 💡 **离线使用**: 所有 YOLO26 模型已预下载到 `models/` 目录,无需网络连接即可运行。详见 [OFFLINE_USAGE.md](OFFLINE_USAGE.md)。
 
 ### 完整功能 (开发中)

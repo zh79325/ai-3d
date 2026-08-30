@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 3D Skeleton Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+            height: 100vh;
+        }
+        
+        /* 主布局 */
+        .main-layout {
+            display: flex;
+            height: 100vh;
+        }
+        
+        /* 左侧控制面板 */
+        #control-panel {
+            width: 320px;
+            background: rgba(0, 0, 0, 0.95);
+            padding: 20px;
+            overflow-y: auto;
+            border-right: 1px solid #333;
+            z-index: 150;
+        }
+        
+        #control-panel h2 {
+            margin: 0 0 15px 0;
+            font-size: 18px;
+            color: #4CAF50;
+        }
+        
+        .section-title {
+            font-size: 14px;
+            color: #aaa;
+            margin: 15px 0 10px 0;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+        }
+        
+        /* 任务列表 */
+        #task-list {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #333;
+            border-radius: 5px;
+            padding: 8px;
+            background: #2a2a2a;
+        }
+        
+        .task-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: #333;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border-left: 3px solid transparent;
+        }
+        
+        .task-item:hover {
+            background: #3a3a3a;
+        }
+        
+        .task-item.active {
+            border-left-color: #4CAF50;
+            background: #2d3a2d;
+        }
+        
+        .task-item.processing {
+            border-left-color: #FF9800;
+        }
+        
+        .task-item.completed {
+            border-left-color: #4CAF50;
+        }
+        
+        .task-item.failed {
+            border-left-color: #f44336;
+        }
+        
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        
+        .task-id {
+            font-size: 12px;
+            color: #888;
+            font-family: monospace;
+        }
+        
+        .task-status {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #555;
+        }
+        
+        .task-status.pending { background: #666; }
+        .task-status.processing { background: #FF9800; color: white; }
+        .task-status.completed { background: #4CAF50; color: white; }
+        .task-status.failed { background: #f44336; color: white; }
+        
+        .task-filename {
+            font-size: 13px;
+            color: #ccc;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .task-progress {
+            margin-top: 5px;
+            height: 4px;
+            background: #444;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        
+        .task-progress-bar {
+            height: 100%;
+            background: #4CAF50;
+            transition: width 0.3s;
+        }
+        
+        /* 多步骤进度面板 */
+        .step-progress-panel {
+            margin-top: 8px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+            font-size: 11px;
+        }
+        
+        .step-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 0;
+            color: #888;
+        }
+        
+        .step-icon {
+            width: 14px;
+            height: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            font-size: 9px;
+            flex-shrink: 0;
+        }
+        
+        .step-item.pending .step-icon {
+            background: #444;
+            color: #666;
+        }
+        
+        .step-item.processing .step-icon {
+            background: #FF9800;
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+        
+        .step-item.completed .step-icon {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .step-item.failed .step-icon {
+            background: #f44336;
+            color: white;
+        }
+        
+        .step-label {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .step-progress-bar-mini {
+            width: 60px;
+            height: 3px;
+            background: #444;
+            border-radius: 2px;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+        
+        .step-progress-bar-mini-fill {
+            height: 100%;
+            background: #FF9800;
+            transition: width 0.3s;
+        }
+        
+        .step-percent {
+            font-size: 10px;
+            color: #aaa;
+            min-width: 28px;
+            text-align: right;
+            flex-shrink: 0;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        /* 上传区域 */
+        .upload-section {
+            margin-top: 15px;
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+        
+        .file-input-wrapper input[type="file"] {
+            position: absolute;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+        
+        .file-input-label {
+            display: block;
+            padding: 12px;
+            background: #333;
+            border: 2px dashed #666;
+            border-radius: 5px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .file-input-label:hover {
+            border-color: #4CAF50;
+            background: #2a2a2a;
+        }
+        
+        .file-input-label.has-file {
+            border-color: #4CAF50;
+            background: rgba(76, 175, 80, 0.1);
+        }
+        
+        .btn-process {
+            width: 100%;
+            padding: 12px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            transition: background 0.3s;
+            margin-top: 10px;
+        }
+        
+        .btn-process:hover:not(:disabled) {
+            background: #45a049;
+        }
+        
+        .btn-process:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        
+        /* 右侧预览区域 */
+        .preview-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #0d0d0d;
+        }
+        
+        /* 三窗口网格 */
+        .preview-grid {
+            flex: 1;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 2px;
+            background: #333;
+        }
+        
+        /* 底部播放控制栏 */
+        .playback-bar {
+            flex-shrink: 0;
+            height: 56px;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 0 20px;
+            border-top: 1px solid #333;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            z-index: 100;
+        }
+        
+        .preview-window {
+            background: #1a1a1a;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .preview-header {
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.8);
+            font-size: 13px;
+            color: #aaa;
+            border-bottom: 1px solid #333;
+        }
+        
+        .preview-content {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .preview-content canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        
+        .preview-content video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        
+        .btn-play-toggle {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: bold;
+            transition: background 0.3s;
+            min-width: 100px;
+        }
+        
+        .btn-play-toggle:hover {
+            background: #45a049;
+        }
+        
+        .btn-play-toggle.playing {
+            background: #FF9800;
+        }
+        
+        .frame-info {
+            font-size: 14px;
+            color: #ccc;
+            min-width: 150px;
+        }
+        
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+        
+        .speed-control label {
+            font-size: 13px;
+            color: #aaa;
+        }
+        
+        .speed-control input[type="range"] {
+            width: 100px;
+        }
+        
+        .speed-value {
+            font-size: 13px;
+            color: #ccc;
+            min-width: 35px;
+        }
+        
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-layout">
+        <!-- 左侧控制面板 -->
+        <div id="control-panel">
+            <h2>🎬 AI 3D 动作捕捉</h2>
+            
+            <div class="section-title"> 任务列表</div>
+            <div id="task-list">
+                <p style="color: #666; text-align: center; padding: 20px;">暂无任务</p>
+            </div>
+            
+            <div class="section-title"> 上传新视频</div>
+            <div class="upload-section">
+                <div class="file-input-wrapper">
+                    <input type="file" id="video-upload" accept="video/*">
+                    <label for="video-upload" class="file-input-label" id="file-label">
+                         点击选择视频文件
+                    </label>
+                </div>
+                <button class="btn-process" id="btn-process" disabled>开始处理</button>
+            </div>
+        </div>
+        
+        <!-- 右侧预览区域 -->
+        <div class="preview-area">
+            <!-- 三窗口预览网格 -->
+            <div class="preview-grid">
+                <!-- 窗口1: 原视频 + 骨骼叠加 -->
+                <div class="preview-window">
+                    <div class="preview-header"> 原视频 + 骨骼叠加</div>
+                    <div class="preview-content" id="preview-video-overlay">
+                        <canvas id="canvas-overlay"></canvas>
+                    </div>
+                </div>
+                
+                <!-- 窗口2: 纯骨骼2D -->
+                <div class="preview-window">
+                    <div class="preview-header"> 2D 骨骼检测</div>
+                    <div class="preview-content" id="preview-skeleton-2d">
+                        <canvas id="canvas-2d"></canvas>
+                    </div>
+                </div>
+                
+                <!-- 窗口3: 3D重建 -->
+                <div class="preview-window">
+                    <div class="preview-header">🌐 3D 深度重建</div>
+                    <div class="preview-content" id="preview-3d">
+                        <canvas id="canvas-3d"></canvas>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 底部播放控制栏 -->
+            <div class="playback-bar" id="playback-bar">
+                <button class="btn-play-toggle" id="btn-play-toggle">▶ 播放</button>
+                <div class="frame-info" id="frame-info">帧: 0 / 0</div>
+                <div class="speed-control">
+                    <label>速度:</label>
+                    <input type="range" id="speed-slider" min="0.1" max="3" step="0.1" value="1">
+                    <span class="speed-value" id="speed-value">1x</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <script>
+        // ========== 全局状态 ==========
+        let currentFrame = 0;
+        let totalFrames = 0;
+        let isPlaying = false;
+        let animationData = null;
+        let playInterval = null;
+        let playbackSpeed = 1.0;
+        let selectedFile = null;
+        let currentTaskId = null;
+        let tasks = {};
+        
+        // 视频元素（用于窗口1）
+        let videoElement = null;
+        
+        // Canvas 上下文
+        let ctxOverlay = null;
+        let ctx2D = null;
+        
+        // Three.js 场景（用于窗口3）
+        let scene3D, camera3D, renderer3D, controls3D;
+        let skeletonMeshes3D = [];
+        
+        // COCO 关键点连接关系
+        const BONE_CONNECTIONS = [
+            [0, 1], [1, 3],   // 鼻子 -> 左眼 -> 左耳
+            [0, 2], [2, 4],   // 鼻子 -> 右眼 -> 右耳
+            [5, 6],           // 左肩 -> 右肩
+            [5, 7], [7, 9],   // 左肩 -> 左肘 -> 左手腕
+            [6, 8], [8, 10],  // 右肩 -> 右肘 -> 右手腕
+            [5, 11], [6, 12], // 肩膀 -> 髋部
+            [11, 12],         // 左 -> 右髋
+            [11, 13], [13, 15], // 左髋 -> 左膝 -> 左脚踝
+            [12, 14], [14, 16]  // 右 -> 右膝 -> 右脚踝
+        ];
+        
+        // ========== 初始化 ==========
+        function init() {
+            initCanvas2D();
+            initCanvas3D();
+            setupEventListeners();
+            loadExistingTasks();
+        }
+        
+        // 初始化2D Canvas
+        function initCanvas2D() {
+            const canvasOverlay = document.getElementById('canvas-overlay');
+            const canvas2D = document.getElementById('canvas-2d');
+            
+            resizeCanvas(canvasOverlay);
+            resizeCanvas(canvas2D);
+            
+            ctxOverlay = canvasOverlay.getContext('2d');
+            ctx2D = canvas2D.getContext('2d');
+            
+            window.addEventListener('resize', () => {
+                resizeCanvas(canvasOverlay);
+                resizeCanvas(canvas2D);
+                if (animationData) renderAllViews(currentFrame);
+            });
+        }
+        
+        function resizeCanvas(canvas) {
+            const parent = canvas.parentElement;
+            canvas.width = parent.clientWidth;
+            canvas.height = parent.clientHeight;
+        }
+        
+        // 初始化3D场景
+        function initCanvas3D() {
+            const container = document.getElementById('preview-3d');
+            const canvas = document.getElementById('canvas-3d');
+            
+            resizeCanvas(canvas);
+            
+            scene3D = new THREE.Scene();
+            scene3D.background = new THREE.Color(0x1a1a1a);
+            
+            camera3D = new THREE.PerspectiveCamera(75, canvas.width / canvas.height, 0.1, 1000);
+            camera3D.position.set(0, 0, 5);
+            
+            renderer3D = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            renderer3D.setSize(canvas.width, canvas.height);
+            renderer3D.setPixelRatio(window.devicePixelRatio);
+            
+            controls3D = new THREE.OrbitControls(camera3D, canvas);
+            controls3D.enableDamping = true;
+            controls3D.dampingFactor = 0.05;
+            
+            const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
+            scene3D.add(gridHelper);
+            
+            const axesHelper = new THREE.AxesHelper(2);
+            scene3D.add(axesHelper);
+            
+            animate3D();
+        }
+        
+        function animate3D() {
+            requestAnimationFrame(animate3D);
+            controls3D.update();
+            renderer3D.render(scene3D, camera3D);
+        }
+        
+        // ========== 事件监听 ==========
+        function setupEventListeners() {
+            // 文件选择
+            document.getElementById('video-upload').addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    selectedFile = file;
+                    const label = document.getElementById('file-label');
+                    label.textContent = `✅ ${file.name}`;
+                    label.classList.add('has-file');
+                    document.getElementById('btn-process').disabled = false;
+                }
+            });
+            
+            // 处理按钮
+            document.getElementById('btn-process').addEventListener('click', uploadAndProcess);
+            
+            // 播放/暂停切换按钮
+            document.getElementById('btn-play-toggle').addEventListener('click', togglePlayPause);
+            
+            // 速度滑块
+            document.getElementById('speed-slider').addEventListener('input', function() {
+                playbackSpeed = parseFloat(this.value);
+                document.getElementById('speed-value').textContent = playbackSpeed + 'x';
+                if (isPlaying) {
+                    stopPlayback();
+                    startPlayback();
+                }
+            });
+        }
+        
+        // ========== 上传与处理 ==========
+        async function uploadAndProcess() {
+            if (!selectedFile) return;
+            
+            const btn = document.getElementById('btn-process');
+            btn.disabled = true;
+            btn.textContent = '处理中...';
+            
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            
+            try {
+                const response = await fetch('/api/skeleton-viewer/process-video', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || '上传失败');
+                }
+                
+                const result = await response.json();
+                
+                tasks[result.task_id] = {
+                    task_id: result.task_id,
+                    filename: result.filename,
+                    status: 'processing',
+                    progress_percent: 0,
+                    message: result.message
+                };
+                
+                updateTaskList();
+                pollTaskStatus(result.task_id);
+                
+                // 重置上传控件
+                selectedFile = null;
+                document.getElementById('video-upload').value = '';
+                const label = document.getElementById('file-label');
+                label.textContent = '📁 点击选择视频文件';
+                label.classList.remove('has-file');
+                btn.disabled = false;
+                btn.textContent = '开始处理';
+                
+            } catch (error) {
+                console.error('Error:', error);
+                alert('处理失败: ' + error.message);
+                btn.disabled = false;
+                btn.textContent = '开始处理';
+            }
+        }
+        
+        // 轮询任务状态
+        async function pollTaskStatus(taskId) {
+            try {
+                const response = await fetch(`/api/skeleton-viewer/task/${taskId}`);
+                if (!response.ok) return;
+                
+                const task = await response.json();
+                console.log('Task update:', taskId, 'status:', task.status, 'progress:', task.progress_percent, 'msg:', task.message);
+                tasks[taskId] = task;
+                updateTaskList();
+                
+                if (task.status === 'processing') {
+                    setTimeout(() => pollTaskStatus(taskId), 1000);
+                } else if (task.status === 'completed' && task.has_data) {
+                    loadTaskData(taskId);
+                }
+            } catch (error) {
+                console.error('Error polling task:', error);
+            }
+        }
+        
+        // 更新任务列表UI
+        function updateTaskList() {
+            const taskListEl = document.getElementById('task-list');
+            const taskIds = Object.keys(tasks);
+            
+            if (taskIds.length === 0) {
+                taskListEl.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">暂无任务</p>';
+                return;
+            }
+            
+            const sortedTasks = taskIds
+                .map(id => tasks[id])
+                .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+            
+            taskListEl.innerHTML = sortedTasks.map(task => {
+                const progressPercent = task.progress_percent || 0;
+                console.log(`Rendering task ${task.task_id}: progress=${progressPercent}%, status=${task.status}`);
+                
+                // 构建多步骤面板HTML
+                let stepPanelHtml = '';
+                if (task.status === 'processing' && task.step_progress) {
+                    stepPanelHtml = renderStepProgressPanel(task.step_progress);
+                } else if (task.status === 'completed') {
+                    // 已完成任务显示所有步骤打勾
+                    stepPanelHtml = renderCompletedSteps();
+                }
+                
+                return `
+                <div class="task-item ${task.status} ${currentTaskId === task.task_id ? 'active' : ''}" 
+                     onclick="selectTask('${task.task_id}')">
+                    <div class="task-header">
+                        <span class="task-id">${task.task_id}</span>
+                        <span class="task-status ${task.status}">${getStatusText(task.status)}</span>
+                    </div>
+                    <div class="task-filename" title="${task.filename}">${task.filename}</div>
+                    ${stepPanelHtml}
+                </div>
+            `}).join('');
+        }
+        
+        // 定义处理步骤及其显示名称
+        const PIPELINE_STEPS = [
+            { key: 'video_read', label: '加载视频' },
+            { key: 'frame_extract', label: '提取帧' },
+            { key: 'bg_remove', label: '背景移除' },
+            { key: 'pose_estimate', label: '姿态估计' },
+            { key: 'depth_convert', label: '深度转换' },
+            { key: 'validation', label: '数据校验' }
+        ];
+        
+        // 渲染进行中的多步骤面板
+        function renderStepProgressPanel(stepProgress) {
+            return `<div class="step-progress-panel">
+                ${PIPELINE_STEPS.map(step => {
+                    const stepData = stepProgress[step.key];
+                    if (!stepData) return ''; // 尚未开始的步骤不显示
+                    
+                    const { status, current, total, message } = stepData;
+                    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+                    
+                    let iconContent, itemClass;
+                    if (status === 'completed') {
+                        iconContent = '✓';
+                        itemClass = 'completed';
+                    } else if (status === 'processing') {
+                        iconContent = '⟳';
+                        itemClass = 'processing';
+                    } else if (status === 'failed') {
+                        iconContent = '✗';
+                        itemClass = 'failed';
+                    } else {
+                        iconContent = '·';
+                        itemClass = 'pending';
+                    }
+                    
+                    const progressBarHtml = (status === 'processing' && total > 0) ? 
+                        `<div class="step-progress-bar-mini"><div class="step-progress-bar-mini-fill" style="width: ${percent}%"></div></div>` : '';
+                    const percentText = (status === 'processing' && total > 0) ? 
+                        `<span class="step-percent">${percent}%</span>` : '';
+                    
+                    return `<div class="step-item ${itemClass}">
+                        <span class="step-icon">${iconContent}</span>
+                        <span class="step-label">${step.label}${message && status === 'processing' ? ` — ${message}` : ''}</span>
+                        ${progressBarHtml}
+                        ${percentText}
+                    </div>`;
+                }).join('')}
+            </div>`;
+        }
+        
+        // 渲染已完成的所有步骤
+        function renderCompletedSteps() {
+            return `<div class="step-progress-panel">
+                ${PIPELINE_STEPS.map(step => 
+                    `<div class="step-item completed">
+                        <span class="step-icon">✓</span>
+                        <span class="step-label">${step.label}</span>
+                    </div>`
+                ).join('')}
+            </div>`;
+        }
+        
+        function getStatusText(status) {
+            const map = { pending: '等待中', processing: '处理中', completed: '已完成', failed: '失败' };
+            return map[status] || status;
+        }
+        
+        // 选择任务
+        async function selectTask(taskId) {
+            currentTaskId = taskId;
+            updateTaskList();
+            
+            const task = tasks[taskId];
+            if (task.status === 'completed' && task.has_data) {
+                await loadTaskData(taskId);
+            }
+        }
+        
+        // 加载任务数据
+        async function loadTaskData(taskId) {
+            try {
+                const response = await fetch(`/api/skeleton-viewer/task/${taskId}/data`);
+                if (!response.ok) throw new Error('Failed to load data');
+                
+                animationData = await response.json();
+                totalFrames = animationData.skeletons.length;
+                
+                document.getElementById('playback-bar').style.display = 'flex';
+                updateFrameInfo();
+                renderAllViews(0);
+                
+                // 加载视频到窗口1（使用task_id作为视频流标识）
+                loadVideoToWindow(taskId);
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+                alert('加载数据失败: ' + error.message);
+            }
+        }
+        
+        // 加载视频到窗口1
+        function loadVideoToWindow(taskId) {
+            const container = document.getElementById('preview-video-overlay');
+            
+            // 移除可能存在的旧video元素，只保留canvas
+            const oldVideo = container.querySelector('video');
+            if (oldVideo) oldVideo.remove();
+            
+            let video = document.createElement('video');
+            video.muted = true;
+            video.loop = false;
+            video.style.display = 'none'; // 隐藏video，仅用于Canvas绘制源
+            container.appendChild(video);
+            
+            video.src = `/api/skeleton-viewer/video/${taskId}`;
+            video.load();
+            videoElement = video;
+        }
+        
+        // ========== 渲染逻辑 ==========
+        function renderAllViews(frameIndex) {
+            if (!animationData || frameIndex >= totalFrames) return;
+            
+            const frame = animationData.skeletons[frameIndex];
+            if (!frame) return;
+            
+            renderOverlayView(frameIndex, frame);
+            render2DView(frame);
+            render3DView(frame);
+            
+            currentFrame = frameIndex;
+            updateFrameInfo();
+        }
+        
+        // 窗口1: 原视频 + 骨骼叠加
+        function renderOverlayView(frameIndex, frame) {
+            const canvas = document.getElementById('canvas-overlay');
+            const ctx = ctxOverlay;
+            if (!ctx) return;
+            
+            const w = canvas.width;
+            const h = canvas.height;
+            
+            // 清空画布
+            ctx.clearRect(0, 0, w, h);
+            
+            // 如果有视频，绘制当前帧
+            if (videoElement && videoElement.readyState >= 2) {
+                const videoAspect = videoElement.videoWidth / videoElement.videoHeight;
+                const canvasAspect = w / h;
+                
+                let drawW, drawH, offsetX, offsetY;
+                if (videoAspect > canvasAspect) {
+                    drawW = w;
+                    drawH = w / videoAspect;
+                    offsetX = 0;
+                    offsetY = (h - drawH) / 2;
+                } else {
+                    drawH = h;
+                    drawW = h * videoAspect;
+                    offsetX = (w - drawW) / 2;
+                    offsetY = 0;
+                }
+                
+                ctx.drawImage(videoElement, offsetX, offsetY, drawW, drawH);
+            } else {
+                ctx.fillStyle = '#1a1a1a';
+                ctx.fillRect(0, 0, w, h);
+            }
+            
+            // 绘制骨骼叠加层
+            drawSkeletonOnCanvas(ctx, frame, w, h, true);
+        }
+        
+        // 窗口2: 纯2D骨骼
+        function render2DView(frame) {
+            const canvas = document.getElementById('canvas-2d');
+            const ctx = ctx2D;
+            if (!ctx) return;
+            
+            const w = canvas.width;
+            const h = canvas.height;
+            
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, w, h);
+            
+            drawSkeletonOnCanvas(ctx, frame, w, h, false);
+        }
+        
+        // 在Canvas上绘制骨骼
+        function drawSkeletonOnCanvas(ctx, frame, canvasW, canvasH, withBackground) {
+            const joints = frame.joints;
+            if (!joints || joints.length === 0) return;
+            
+            // 计算边界框以自适应缩放
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            joints.forEach(j => {
+                const pos = j.position || j.get?.('position') || [0, 0, 0];
+                if (pos[0] < minX) minX = pos[0];
+                if (pos[0] > maxX) maxX = pos[0];
+                if (pos[1] < minY) minY = pos[1];
+                if (pos[1] > maxY) maxY = pos[1];
+            });
+            
+            const rangeX = maxX - minX || 1;
+            const rangeY = maxY - minY || 1;
+            const padding = 40;
+            const scale = Math.min((canvasW - padding * 2) / rangeX, (canvasH - padding * 2) / rangeY);
+            
+            const toScreenX = (x) => padding + (x - minX) * scale;
+            const toScreenY = (y) => padding + (y - minY) * scale;
+            
+            // 绘制连线
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            BONE_CONNECTIONS.forEach(([i, j]) => {
+                if (i >= joints.length || j >= joints.length) return;
+                const p1 = joints[i].position || joints[i].get?.('position') || [0, 0, 0];
+                const p2 = joints[j].position || joints[j].get?.('position') || [0, 0, 0];
+                
+                ctx.beginPath();
+                ctx.moveTo(toScreenX(p1[0]), toScreenY(p1[1]));
+                ctx.lineTo(toScreenX(p2[0]), toScreenY(p2[1]));
+                ctx.stroke();
+            });
+            
+            // 绘制关键点
+            joints.forEach((joint, idx) => {
+                const pos = joint.position || joint.get?.('position') || [0, 0, 0];
+                const x = toScreenX(pos[0]);
+                const y = toScreenY(pos[1]);
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fillStyle = getJointColor(idx);
+                ctx.fill();
+            });
+        }
+        
+        // 窗口3: 3D重建
+        function render3DView(frame) {
+            skeletonMeshes3D.forEach(mesh => scene3D.remove(mesh));
+            skeletonMeshes3D = [];
+            
+            const joints = frame.joints;
+            if (!joints) return;
+            
+            // 绘制关键点
+            joints.forEach((joint, idx) => {
+                const pos = joint.position || joint.get?.('position');
+                if (!pos || pos.length < 3) return;
+                
+                const geometry = new THREE.SphereGeometry(0.05, 16, 16);
+                const material = new THREE.MeshPhongMaterial({ 
+                    color: getJointColor(idx),
+                    emissive: getJointColor(idx),
+                    emissiveIntensity: 0.3
+                });
+                const sphere = new THREE.Mesh(geometry, material);
+                sphere.position.set(pos[0], -pos[1], pos[2]);
+                scene3D.add(sphere);
+                skeletonMeshes3D.push(sphere);
+            });
+            
+            // 绘制骨骼连线
+            BONE_CONNECTIONS.forEach(([idx1, idx2]) => {
+                if (idx1 >= joints.length || idx2 >= joints.length) return;
+                
+                const j1 = joints[idx1];
+                const j2 = joints[idx2];
+                const p1 = j1.position || j1.get?.('position');
+                const p2 = j2.position || j2.get?.('position');
+                
+                if (!p1 || !p2) return;
+                
+                const points = [
+                    new THREE.Vector3(p1[0], -p1[1], p1[2]),
+                    new THREE.Vector3(p2[0], -p2[1], p2[2])
+                ];
+                
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
+                const line = new THREE.Line(geometry, material);
+                scene3D.add(line);
+                skeletonMeshes3D.push(line);
+            });
+        }
+        
+        function getJointColor(index) {
+            const colors = [0xff0000, 0xff6600, 0xffff00, 0x00ff00, 0x00ffff, 0x0000ff, 0xff00ff, 0xffffff];
+            return colors[index % colors.length];
+        }
+        
+        function updateFrameInfo() {
+            document.getElementById('frame-info').textContent = `帧: ${currentFrame} / ${totalFrames - 1}`;
+        }
+        
+        // ========== 播放控制 ==========
+        function togglePlayPause() {
+            if (isPlaying) {
+                pause();
+            } else {
+                play();
+            }
+        }
+        
+        function play() {
+            if (isPlaying || !animationData) return;
+            isPlaying = true;
+            
+            const btn = document.getElementById('btn-play-toggle');
+            btn.textContent = '⏸ 暂停';
+            btn.classList.add('playing');
+            
+            startPlayback();
+        }
+        
+        function startPlayback() {
+            const fps = animationData ? animationData.fps : 30;
+            const interval = (1000 / fps) / playbackSpeed;
+            
+            playInterval = setInterval(() => {
+                currentFrame++;
+                if (currentFrame >= totalFrames) {
+                    currentFrame = 0;
+                }
+                renderAllViews(currentFrame);
+                
+                // 同步视频播放
+                if (videoElement && videoElement.readyState >= 2) {
+                    const videoTime = (currentFrame / totalFrames) * videoElement.duration;
+                    videoElement.currentTime = videoTime;
+                }
+            }, interval);
+        }
+        
+        function pause() {
+            isPlaying = false;
+            stopPlayback();
+            
+            const btn = document.getElementById('btn-play-toggle');
+            btn.textContent = '▶ 播放';
+            btn.classList.remove('playing');
+        }
+        
+        function stopPlayback() {
+            if (playInterval) {
+                clearInterval(playInterval);
+                playInterval = null;
+            }
+        }
+        
+        // ========== 加载已有任务 ==========
+        async function loadExistingTasks() {
+            try {
+                const response = await fetch('/api/skeleton-viewer/tasks');
+                if (response.ok) {
+                    const data = await response.json();
+                    data.tasks.forEach(task => { tasks[task.task_id] = task; });
+                    updateTaskList();
+                    
+                    const completedTask = data.tasks.find(t => t.status === 'completed' && t.has_data);
+                    if (completedTask) {
+                        await loadTaskData(completedTask.task_id);
+                        currentTaskId = completedTask.task_id;
+                        updateTaskList();
+                    }
+                }
+            } catch (error) {
+                console.log('No existing tasks loaded');
+            }
+        }
+        
+        // 启动
+        init();
+    </script>
+</body>
+</html>

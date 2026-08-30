@@ -3,11 +3,15 @@ YOLO26 Pose Estimator Module.
 封装 Ultralytics YOLO26-pose 模型，用于提取人体关键点。
 """
 
+import os
 import torch
 import numpy as np
 from ultralytics import YOLO
 from typing import List, Optional
 from ai3d.models.skeleton import Skeleton
+
+# 禁用 Ultralytics 自动下载模型
+os.environ["YOLO_OFFLINE"] = "true"
 
 
 class PoseEstimator:
