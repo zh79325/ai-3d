@@ -1,5 +1,5 @@
 # AI 3D Animation Generator
-基于 YOLO26 + MediaPipe + 物理约束的单目视频 3D 动画生成工具
+基于 DWPose(133 点全身姿态) + YOLO26 + 物理约束的单目视频 3D 动画生成工具
 
 ## 📦 安装
 
@@ -12,6 +12,9 @@ pip install -e .
 
 ### 第一阶段:姿态检测 (已完成 ✅)
 
+默认使用 DWPose(COCO-WholeBody 133 点:身体+脚+面部+双手),
+可在 `config.model.pose_backend` 切回 YOLO 17 点。
+
 ```python
 from ai3d import MotionCapturePipeline
 
@@ -23,6 +26,7 @@ result = pipeline.process_video('input.mp4')
 
 # 访问骨骼数据
 skeletons = result['skeletons']
+print(f"关键点格式: {result['keypoint_format']}")  # coco_wholebody_133
 first_frame = skeletons[0]
 if first_frame:
     print(f"检测到 {len(first_frame.joints)} 个关键点")
@@ -72,7 +76,7 @@ launch_viewer('input.mp4', port=8765)
 
 详见 [VIEWER_INTEGRATION.md](docs/VIEWER_INTEGRATION.md)
 
-> 💡 **离线使用**: 所有 YOLO26 模型已预下载到 `models/` 目录,无需网络连接即可运行。详见 [OFFLINE_USAGE.md](OFFLINE_USAGE.md)。
+> 💡 **离线使用**: DWPose 与 YOLO26 模型已预下载到 `models/` 目录,无需网络连接即可运行。详见 [OFFLINE_USAGE.md](OFFLINE_USAGE.md)。
 
 ### 完整功能 (开发中)
 
@@ -100,11 +104,13 @@ ai-3d/
 ├── src/ai3d/              # 核心包
 │   ├── __init__.py        # 包入口
 │   ├── core/              # 核心算法
-│   │   ├── pose_estimator.py    # 姿态估计
+│   │   ├── dwpose_estimator.py  # DWPose 133 点姿态估计(默认)
+│   │   ├── pose_estimator.py    # YOLO 17 点姿态估计(备用)
 │   │   ├── depth_estimator.py   # 深度估计
 │   │   ├── weapon_binder.py     # 武器绑定
 │   │   └── physics_solver.py    # 物理解算
 │   ├── models/            # 数据模型
+│   │   ├── keypoints.py         # 关键点名称/骨骼拓扑(单一真值源)
 │   │   ├── skeleton.py          # 骨骼数据结构
 │   │   ├── animation.py         # 动画数据结构
 │   │   └── weapon.py            # 武器数据结构
@@ -154,7 +160,8 @@ def generate_game_asset(video_path):
 
 ## 🎯 核心特性
 
-- ✅ **YOLO26 驱动**: 最新的端到端目标检测与姿态估计
+- ✅ **DWPose 全身关键点**: COCO-WholeBody 133 点,含手部 42 点与面部 68 点
+- ✅ **YOLO26 驱动**: 端到端目标检测、实例分割与备用姿态后端
 - ✅ **深度感知**: 单目深度估计 + 关键点深度推算
 - ✅ **武器绑定**: 刚体道具自动识别与空间绑定
 - ✅ **物理修正**: 重力、碰撞、脚部接地自动优化

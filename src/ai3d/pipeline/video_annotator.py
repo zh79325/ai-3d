@@ -1,24 +1,62 @@
 """
 标注视频合成模块。
-直接用 Ultralytics 原生 Results.plot() 把姿态关键点、实例分割掩码烧进原视频帧，
-输出浏览器可直接播放的 H.264 MP4，避免前端 Canvas 叠加时的坐标缩放误差。
+把姿态关键点、实例分割掩码烧进原视频帧，输出浏览器可直接播放的 H.264 MP4，
+避免前端 Canvas 叠加时的坐标缩放误差。
+
+姿态绘制支持两种输入:
+- Ultralytics 的 Results 对象（YOLO 后端），直接用它的 plot()
+- PoseKeypoints（DWPose 后端），按 ai3d.models.keypoints 的拓扑自绘
+分割掩码仍由 YOLO-seg 的 Results.plot() 绘制。
 """
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
+
+from ai3d.models.keypoints import get_bone_connections, get_groups
+from ai3d.models.skeleton import PoseKeypoints
 
 logger = logging.getLogger(__name__)
 
 # 优先 H.264(avc1)，浏览器可直接播放；不可用时回退 mp4v
 _FOURCC_CANDIDATES = ("avc1", "mp4v")
 
+# 各部位颜色 (BGR)，未列出的分组用 _DEFAULT_COLOR
+_GROUP_COLORS: Dict[str, tuple] = {
+    "body": (0, 255, 0),
+    "feet": (0, 255, 255),
+    "face": (220, 180, 255),
+    "left_hand": (255, 160, 0),
+    "right_hand": (0, 160, 255),
+}
+_DEFAULT_COLOR = (0, 255, 0)
+
+# 每种格式的 索引 -> 分组名 查询表，首次使用时构建并缓存
+_group_lookup_cache: Dict[str, List[str]] = {}
+
+
+def _group_lookup(keypoint_format: str) -> List[str]:
+    """返回长度为关键点数的分组名列表，供按部位着色"""
+    cached = _group_lookup_cache.get(keypoint_format)
+    if cached is not None:
+        return cached
+
+    groups = get_groups(keypoint_format)
+    total = max(end for _, end in groups.values())
+    lookup = [""] * total
+    for name, (start, end) in groups.items():
+        for i in range(start, end):
+            lookup[i] = name
+
+    _group_lookup_cache[keypoint_format] = lookup
+    return lookup
+
 
 class VideoAnnotator:
-    """逐帧接收 YOLO 推理结果，合成标注帧并写入 MP4"""
+    """逐帧接收推理结果，合成标注帧并写入 MP4"""
 
     def __init__(
         self,
@@ -31,6 +69,7 @@ class VideoAnnotator:
         draw_boxes: bool = False,
         draw_labels: bool = False,
         mask_alpha: float = 0.45,
+        keypoint_threshold: float = 0.3,
     ):
         """
         Args:
@@ -43,6 +82,7 @@ class VideoAnnotator:
             draw_boxes: 是否绘制检测框
             draw_labels: 是否绘制类别标签
             mask_alpha: 掩码图层与原帧的混合系数，1.0 为 plot 原始效果，越小越透
+            keypoint_threshold: 自绘关键点时的置信度阈值，低于此值的点不绘制
         """
         self.output_path = str(output_path)
         self.fps = fps if fps and fps > 0 else 25.0
@@ -53,7 +93,14 @@ class VideoAnnotator:
         self.draw_boxes = draw_boxes
         self.draw_labels = draw_labels
         self.mask_alpha = float(np.clip(mask_alpha, 0.0, 1.0))
+        self.keypoint_threshold = float(keypoint_threshold)
         self.frames_written = 0
+
+        # 线宽/点径随分辨率缩放，避免高分辨率下骨架细得看不见
+        short_side = max(1, min(self.width, self.height))
+        self.line_thickness = max(1, round(short_side / 320))
+        self.point_radius = max(2, round(short_side / 260))
+        self.face_point_radius = max(1, self.point_radius - 2)
 
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
         self.writer, self.fourcc = self._open_writer()
@@ -77,6 +124,49 @@ class VideoAnnotator:
             f"(已尝试 {', '.join(_FOURCC_CANDIDATES)})"
         )
 
+    def _draw_pose_keypoints(self, canvas: np.ndarray, pose: PoseKeypoints) -> np.ndarray:
+        """按 ai3d.models.keypoints 的拓扑自绘关键点与骨骼连线（DWPose 无 Results 对象）"""
+        kpts = pose.keypoints
+        scores = pose.scores
+        if kpts is None or scores is None or len(kpts) == 0:
+            return canvas
+
+        lookup = _group_lookup(pose.keypoint_format)
+        thr = self.keypoint_threshold
+        total = min(len(kpts), len(scores), len(lookup))
+
+        # 先画连线，再画关键点，使点不被线遮盖
+        for start, end in get_bone_connections(pose.keypoint_format):
+            if start >= total or end >= total:
+                continue
+            if scores[start] < thr or scores[end] < thr:
+                continue
+            color = _GROUP_COLORS.get(lookup[end], _DEFAULT_COLOR)
+            cv2.line(
+                canvas,
+                (int(kpts[start][0]), int(kpts[start][1])),
+                (int(kpts[end][0]), int(kpts[end][1])),
+                color,
+                self.line_thickness,
+                lineType=cv2.LINE_AA,
+            )
+
+        for i in range(total):
+            if scores[i] < thr:
+                continue
+            group = lookup[i]
+            radius = self.face_point_radius if group == "face" else self.point_radius
+            cv2.circle(
+                canvas,
+                (int(kpts[i][0]), int(kpts[i][1])),
+                radius,
+                _GROUP_COLORS.get(group, _DEFAULT_COLOR),
+                -1,
+                lineType=cv2.LINE_AA,
+            )
+
+        return canvas
+
     def compose_frame(
         self,
         frame_bgr: np.ndarray,
@@ -89,7 +179,7 @@ class VideoAnnotator:
         Args:
             frame_bgr: BGR 原始帧
             seg_result: yolo26n-seg 的单帧 Results 对象
-            pose_result: yolo26n-pose 的单帧 Results 对象
+            pose_result: 姿态结果，YOLO 后端为单帧 Results，DWPose 后端为 PoseKeypoints
         """
         canvas = frame_bgr
 
@@ -109,14 +199,20 @@ class VideoAnnotator:
             canvas = mask_layer
 
         if pose_result is not None and self.draw_pose:
-            canvas = pose_result.plot(
-                img=canvas,
-                masks=False,
-                boxes=self.draw_boxes,
-                labels=self.draw_labels,
-                conf=False,
-                kpt_line=True,
-            )
+            if isinstance(pose_result, PoseKeypoints):
+                # 自绘是原地修改，必须先拷贝，不能污染调用方的原帧
+                if canvas is frame_bgr:
+                    canvas = frame_bgr.copy()
+                canvas = self._draw_pose_keypoints(canvas, pose_result)
+            else:
+                canvas = pose_result.plot(
+                    img=canvas,
+                    masks=False,
+                    boxes=self.draw_boxes,
+                    labels=self.draw_labels,
+                    conf=False,
+                    kpt_line=True,
+                )
 
         # plot() 在无任何检测结果时可能原样返回输入，统一 copy 避免写入时被后续修改
         return canvas if canvas is not frame_bgr else frame_bgr.copy()

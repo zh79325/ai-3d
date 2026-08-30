@@ -159,6 +159,15 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
             'joints': joints
         })
     
+    # 关键点拓扑随数据一起下发：前端不再硬编码骨骼连接，改为读后端给的这份描述
+    from ai3d.models.keypoints import describe_format, format_from_keypoint_count
+
+    keypoint_format = result.get('keypoint_format')
+    if not keypoint_format:
+        # 兜底：按第一帧的关键点数量推断
+        first_joints = next((s['joints'] for s in skeletons_data if s['joints']), [])
+        keypoint_format = format_from_keypoint_count(len(first_joints))
+
     animation_data = {
         'total_frames': len(skeletons_data),
         'fps': result.get('fps', 30.0),
@@ -168,6 +177,9 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
         'has_annotated_video': bool(result.get('annotated_video_path')),
         'skeletons': skeletons_data
     }
+
+    if keypoint_format:
+        animation_data.update(describe_format(keypoint_format))
     
     json_path = output_dir / config.output.animation_json_name
     with open(json_path, 'w', encoding='utf-8') as f:
@@ -176,6 +188,7 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     print(f"✅ 数据已保存到: {json_path}")
     print(f"   总帧数: {len(skeletons_data)}")
     print(f"   FPS: {result.get('fps', 30.0)}")
+    print(f"   关键点格式: {keypoint_format or '未知'}")
     
     tracker.finish("export_json", f"已写入 {config.output.animation_json_name}")
     final_steps = tracker.snapshot()["steps"]

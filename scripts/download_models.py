@@ -1,10 +1,31 @@
 """
-Download YOLO26 models for offline use.
-下载 YOLO26 模型到本地,支持离线运行。
+Download models for offline use.
+下载 YOLO26 / DWPose 模型到本地,支持离线运行。
 """
 
 import os
+import shutil
+import tempfile
+import urllib.request
+import zipfile
 from ultralytics import YOLO
+
+# DWPose (rtmlib Wholebody, mode='balanced') 所需的两个 ONNX 模型
+# 压缩包内均为 end2end.onnx,下载后重命名为带输入尺寸的文件名,便于与 config 中的 input_size 对齐
+DWPOSE_MODELS = [
+    {
+        "target": "dwpose-det-yolox-m-640x640.onnx",
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
+               "onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
+        "desc": "人体检测器 YOLOX-m (输入 640x640, 约 97MB)",
+    },
+    {
+        "target": "dwpose-pose-rtmw-x-l-192x256.onnx",
+        "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmw/"
+               "onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-256x192_20231122.zip",
+        "desc": "133 点全身姿态 RTMW-x (输入 192x256, 约 218MB)",
+    },
+]
 
 
 def download_model(model_name: str = "yolo26n-pose.pt", save_dir: str = "./models"):
@@ -47,6 +68,61 @@ def download_model(model_name: str = "yolo26n-pose.pt", save_dir: str = "./model
         raise
 
 
+def download_dwpose_models(save_dir: str = "./models"):
+    """
+    下载 DWPose (rtmlib balanced 模式) 的检测器与姿态 ONNX 模型到本地目录
+
+    下载完成后即可完全离线运行,代码通过 ai3d.config.ModelConfig 中的
+    dwpose_det_model / dwpose_pose_model 显式加载这两个文件。
+
+    Args:
+        save_dir: 保存目录
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    print("正在下载 DWPose 模型 (共 2 个, 合计约 315MB)")
+    print(f"保存路径: {save_dir}\n")
+
+    for item in DWPOSE_MODELS:
+        target_path = os.path.join(save_dir, item["target"])
+        if os.path.exists(target_path):
+            size_mb = os.path.getsize(target_path) / 1024 / 1024
+            print(f"⚠️  已存在,跳过: {item['target']} ({size_mb:.1f} MB)")
+            continue
+
+        print(f"⬇️  {item['desc']}")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            zip_path = os.path.join(tmp_dir, "model.zip")
+            try:
+                urllib.request.urlretrieve(item["url"], zip_path)
+            except OSError as e:
+                print(f"❌ 下载失败: {item['url']}\n   {e}")
+                raise
+
+            extract_dir = os.path.join(tmp_dir, "extracted")
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(extract_dir)
+
+            onnx_path = None
+            for root, _, files in os.walk(extract_dir):
+                for name in files:
+                    if name.endswith(".onnx"):
+                        onnx_path = os.path.join(root, name)
+                        break
+                if onnx_path:
+                    break
+
+            if not onnx_path:
+                raise RuntimeError(f"压缩包内未找到 .onnx 文件: {item['url']}")
+
+            shutil.copy2(onnx_path, target_path)
+
+        size_mb = os.path.getsize(target_path) / 1024 / 1024
+        print(f"✅ 已保存: {target_path} ({size_mb:.1f} MB)\n")
+
+    print("🎉 DWPose 模型准备完成,后续运行无需联网。")
+
+
 def list_available_models():
     """列出可用的 YOLO26-pose 模型"""
     models = [
@@ -68,7 +144,12 @@ def list_available_models():
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="下载 YOLO26 模型")
+    parser = argparse.ArgumentParser(description="下载 YOLO26 / DWPose 模型")
+    parser.add_argument(
+        "--dwpose",
+        action="store_true",
+        help="下载 DWPose 133 点姿态所需的 det + pose ONNX 模型"
+    )
     parser.add_argument(
         "--model", 
         type=str, 
@@ -91,5 +172,7 @@ if __name__ == "__main__":
     
     if args.list:
         list_available_models()
+    elif args.dwpose:
+        download_dwpose_models(args.dir)
     else:
         download_model(args.model, args.dir)

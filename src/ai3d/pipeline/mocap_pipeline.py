@@ -8,6 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from ai3d.core.pose_estimator import PoseEstimator
+from ai3d.core.dwpose_estimator import DWPoseEstimator
 from ai3d.core.depth_estimator import DepthEstimator
 from ai3d.utils.video_io import VideoReader
 from ai3d.utils.coordinate import convert_skeleton_to_3d
@@ -29,10 +30,9 @@ class MotionCapturePipeline:
             config: 配置对象,使用默认配置如果为 None
         """
         self.config = config or Config()
-        self.pose_estimator = PoseEstimator(
-            model_name=self.config.model.pose_model,
-            device=self.config.model.device
-        )
+        self.pose_estimator = self._create_pose_estimator()
+        # 关键点格式随后端而定，需随结果一起下发给前端，前端据此取拓扑
+        self.keypoint_format = self.pose_estimator.keypoint_format
         
         # 可选的深度估计器
         self.depth_estimator = None
@@ -46,6 +46,36 @@ class MotionCapturePipeline:
             except Exception as e:
                 print(f"⚠️  深度估计器加载失败: {e}")
                 print("   将仅使用 2D 姿态估计")
+    
+    def _create_pose_estimator(self):
+        """根据 config.model.pose_backend 创建姿态估计器
+
+        两种后端对外接口一致（estimate_batch / estimate_frame），仅关键点数量不同：
+        - 'dwpose': COCO-WholeBody 133 点（身体+脚+面部+双手）
+        - 'yolo':   COCO 17 点（仅身体）
+        """
+        backend = (self.config.model.pose_backend or "dwpose").lower()
+        
+        if backend == "yolo":
+            print("姿态后端: YOLO-pose (17 点)")
+            return PoseEstimator(
+                model_name=self.config.model.pose_model,
+                device=self.config.model.device
+            )
+        
+        if backend != "dwpose":
+            print(f"⚠️  未知的 pose_backend: {backend}，按 dwpose 处理")
+        
+        print("姿态后端: DWPose (133 点)")
+        return DWPoseEstimator(
+            det_model=self.config.model.dwpose_det_model,
+            pose_model=self.config.model.dwpose_pose_model,
+            det_input_size=self.config.model.dwpose_det_input_size,
+            pose_input_size=self.config.model.dwpose_pose_input_size,
+            device=self.config.model.device,
+            backend=self.config.model.dwpose_backend,
+            keypoint_threshold=self.config.model.dwpose_keypoint_threshold,
+        )
     
     def process_video(self, video_path: str, output_dir: Optional[str] = None,
                       progress_callback=None, tracker=None) -> dict:
@@ -110,6 +140,7 @@ class MotionCapturePipeline:
                     draw_masks=self.config.pipeline.annotate_masks,
                     draw_pose=self.config.pipeline.annotate_pose,
                     mask_alpha=self.config.pipeline.annotate_mask_alpha,
+                    keypoint_threshold=self.config.model.dwpose_keypoint_threshold,
                 )
                 tracker.start("annotate_video", len(frames), "等待姿态估计结果...")
             elif render_annotated:
@@ -251,6 +282,7 @@ class MotionCapturePipeline:
             "fps": reader.fps,
             "width": reader.width,
             "height": reader.height,
+            "keypoint_format": self.keypoint_format,
             "skeletons": final_skeletons,
             "use_depth": self.depth_estimator is not None
         }

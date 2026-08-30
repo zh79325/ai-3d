@@ -8,6 +8,8 @@ import torch
 import numpy as np
 from ultralytics import YOLO
 from typing import List, Optional
+from ai3d.config import resolve_model_path
+from ai3d.models.keypoints import FORMAT_COCO_17, get_keypoint_names
 from ai3d.models.skeleton import Skeleton
 
 # 禁用 Ultralytics 自动下载模型
@@ -15,23 +17,27 @@ os.environ["YOLO_OFFLINE"] = "true"
 
 
 class PoseEstimator:
-    def __init__(self, model_name: str = "yolo26n-pose.pt", device: str = "cpu"):
+    def __init__(self, model_name: str = "./models/yolo26n-pose.pt", device: str = "cpu"):
         """
         初始化姿态估计器。
         
         Args:
-            model_name: YOLO26-pose 模型名称 (如 yolo26n-pose.pt)
+            model_name: YOLO26-pose 模型路径，相对路径按项目根解析
             device: 运行设备 ('cpu', 'cuda', 'mps')
         """
-        self.model = YOLO(model_name)
+        # 必须传本地绝对路径：只给文件名时 Ultralytics 会联网下载到当前工作目录
+        model_path = resolve_model_path(model_name)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"YOLO 姿态模型缺失: {model_path}\n"
+                f"请先运行: python scripts/download_models.py"
+            )
+        
+        self.model = YOLO(model_path)
         self.device = device
-        # COCO 17个关键点的名称映射
-        self.keypoint_names = [
-            "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-            "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-            "left_wrist", "right_wrist", "left_hip", "right_hip",
-            "left_knee", "right_knee", "left_ankle", "right_ankle"
-        ]
+        # COCO 17 个关键点的名称与拓扑统一由 ai3d.models.keypoints 提供
+        self.keypoint_format = FORMAT_COCO_17
+        self.keypoint_names = get_keypoint_names(FORMAT_COCO_17)
 
     def estimate_frame(self, frame: np.ndarray, return_result: bool = False):
         """

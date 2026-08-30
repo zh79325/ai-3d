@@ -8,21 +8,30 @@ import torch
 import numpy as np
 from ultralytics import YOLO
 from typing import Optional
+from ai3d.config import resolve_model_path
 
 # 禁用 Ultralytics 自动下载模型
 os.environ["YOLO_OFFLINE"] = "true"
 
 
 class DepthEstimator:
-    def __init__(self, model_name: str = "yolo26n-depth.pt", device: str = "cpu"):
+    def __init__(self, model_name: str = "./models/yolo26n-depth.pt", device: str = "cpu"):
         """
         初始化深度估计器。
         
         Args:
-            model_name: YOLO26-depth 模型名称 (如 yolo26n-depth.pt)
+            model_name: YOLO26-depth 模型路径，相对路径按项目根解析
             device: 运行设备 ('cpu', 'cuda', 'mps')
         """
-        self.model = YOLO(model_name)
+        # 必须传本地绝对路径：只给文件名时 Ultralytics 会联网下载到当前工作目录
+        model_path = resolve_model_path(model_name)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"YOLO 深度模型缺失: {model_path}\n"
+                f"请先运行: python scripts/download_models.py"
+            )
+        
+        self.model = YOLO(model_path)
         self.device = device
     
     def estimate_depth(self, frame: np.ndarray) -> Optional[np.ndarray]:

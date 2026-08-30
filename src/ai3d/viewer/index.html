@@ -498,18 +498,87 @@
         let scene3D, camera3D, renderer3D, controls3D;
         let skeletonMeshes3D = [];
         
-        // COCO 关键点连接关系
-        const BONE_CONNECTIONS = [
-            [0, 1], [1, 3],   // 鼻子 -> 左眼 -> 左耳
-            [0, 2], [2, 4],   // 鼻子 -> 右眼 -> 右耳
-            [5, 6],           // 左肩 -> 右肩
-            [5, 7], [7, 9],   // 左肩 -> 左肘 -> 左手腕
-            [6, 8], [8, 10],  // 右肩 -> 右肘 -> 右手腕
-            [5, 11], [6, 12], // 肩膀 -> 髋部
-            [11, 12],         // 左 -> 右髋
-            [11, 13], [13, 15], // 左髋 -> 左膝 -> 左脚踝
-            [12, 14], [14, 16]  // 右 -> 右膝 -> 右脚踝
-        ];
+        // 关键点拓扑由后端随 animation_data.json 一起下发（唯一真值源为 ai3d/models/keypoints.py）。
+        // 这里只保留 COCO-17 作为老数据的兜底，不再硬编码 133 点索引。
+        const FALLBACK_TOPOLOGY = {
+            format: 'coco_17',
+            bone_connections: [
+                [0, 1], [1, 3],   // 鼻子 -> 左眼 -> 左耳
+                [0, 2], [2, 4],   // 鼻子 -> 右眼 -> 右耳
+                [5, 6],           // 左肩 -> 右肩
+                [5, 7], [7, 9],   // 左肩 -> 左肘 -> 左手腕
+                [6, 8], [8, 10],  // 右肩 -> 右肘 -> 右手腕
+                [5, 11], [6, 12], // 肩膀 -> 髋部
+                [11, 12],         // 左 -> 右髋
+                [11, 13], [13, 15], // 左髋 -> 左膝 -> 左脚踝
+                [12, 14], [14, 16]  // 右 -> 右膝 -> 右脚踝
+            ],
+            render_3d_indices: null,  // null 表示全部渲染
+            groups: { body: [0, 17] }
+        };
+        
+        // 各部位配色，与后端标注视频保持同一套语义
+        const GROUP_COLORS = {
+            body: 0x00ff00,
+            feet: 0xffff00,
+            face: 0xff88ff,
+            left_hand: 0x00a0ff,
+            right_hand: 0xffa000
+        };
+        const DEFAULT_JOINT_COLOR = 0x00ff00;
+        // 面部点密集，3D 里不渲染，2D 叠加时用更小的点径
+        const SMALL_POINT_GROUPS = new Set(['face', 'left_hand', 'right_hand', 'feet']);
+        // 低于该置信度的关键点不绘制，与后端 dwpose_keypoint_threshold 语义一致
+        const KEYPOINT_THRESHOLD = 0.3;
+        
+        // 取当前数据的拓扑；缺字段时回退到 COCO-17
+        function getTopology() {
+            if (animationData && Array.isArray(animationData.bone_connections)) {
+                return {
+                    format: animationData.format || 'unknown',
+                    bone_connections: animationData.bone_connections,
+                    render_3d_indices: animationData.render_3d_indices || null,
+                    groups: animationData.groups || {}
+                };
+            }
+            return FALLBACK_TOPOLOGY;
+        }
+        
+        // 索引 -> 分组名 查询表，按格式缓存
+        let groupLookupCache = { format: null, lookup: [] };
+        function getGroupLookup() {
+            const topo = getTopology();
+            if (groupLookupCache.format === topo.format) return groupLookupCache.lookup;
+            
+            const lookup = [];
+            Object.keys(topo.groups || {}).forEach(name => {
+                const range = topo.groups[name];
+                for (let i = range[0]; i < range[1]; i++) lookup[i] = name;
+            });
+            groupLookupCache = { format: topo.format, lookup };
+            return lookup;
+        }
+        
+        function getJointGroup(index) {
+            return getGroupLookup()[index] || '';
+        }
+        
+        function getJointColor(index) {
+            const color = GROUP_COLORS[getJointGroup(index)];
+            return color === undefined ? DEFAULT_JOINT_COLOR : color;
+        }
+        
+        function hexToCss(hex) {
+            return '#' + hex.toString(16).padStart(6, '0');
+        }
+        
+        function jointPosition(joint) {
+            return (joint && joint.position) || [0, 0, 0];
+        }
+        
+        function isJointVisible(joint) {
+            return !joint || joint.confidence === undefined || joint.confidence >= KEYPOINT_THRESHOLD;
+        }
         
         // ========== 初始化 ==========
         function init() {
@@ -917,85 +986,117 @@
             const toScreenX = (x) => offsetX + x * scale;
             const toScreenY = (y) => offsetY + y * scale;
             
-            // 绘制连线
-            ctx.strokeStyle = '#00ff00';
+            // 绘制连线，颜色取终点所属部位，与标注视频同一套语义
             ctx.lineWidth = 2;
-            BONE_CONNECTIONS.forEach(([i, j]) => {
+            getTopology().bone_connections.forEach(([i, j]) => {
                 if (i >= joints.length || j >= joints.length) return;
-                const p1 = joints[i].position || joints[i].get?.('position') || [0, 0, 0];
-                const p2 = joints[j].position || joints[j].get?.('position') || [0, 0, 0];
+                if (!isJointVisible(joints[i]) || !isJointVisible(joints[j])) return;
+                const p1 = jointPosition(joints[i]);
+                const p2 = jointPosition(joints[j]);
                 
+                ctx.strokeStyle = hexToCss(getJointColor(j));
                 ctx.beginPath();
                 ctx.moveTo(toScreenX(p1[0]), toScreenY(p1[1]));
                 ctx.lineTo(toScreenX(p2[0]), toScreenY(p2[1]));
                 ctx.stroke();
             });
             
-            // 绘制关键点
+            // 绘制关键点，面部/手部点密集,用更小的半径
             joints.forEach((joint, idx) => {
-                const pos = joint.position || joint.get?.('position') || [0, 0, 0];
-                const x = toScreenX(pos[0]);
-                const y = toScreenY(pos[1]);
+                if (!isJointVisible(joint)) return;
+                const pos = jointPosition(joint);
+                const radius = SMALL_POINT_GROUPS.has(getJointGroup(idx)) ? 2 : 5;
                 
                 ctx.beginPath();
-                ctx.arc(x, y, 5, 0, Math.PI * 2);
-                ctx.fillStyle = getJointColor(idx);
+                ctx.arc(toScreenX(pos[0]), toScreenY(pos[1]), radius, 0, Math.PI * 2);
+                ctx.fillStyle = hexToCss(getJointColor(idx));
                 ctx.fill();
             });
         }
         
-        // 窗口2: 3D重建
+        // 133 点逐帧重建 Mesh 开销大，球体几何与材质按 半径/颜色 缓存复用
+        const sphereGeometryCache = {};
+        const jointMaterialCache = {};
+        const lineMaterialCache = {};
+        
+        function getSphereGeometry(radius) {
+            if (!sphereGeometryCache[radius]) {
+                sphereGeometryCache[radius] = new THREE.SphereGeometry(radius, 12, 12);
+            }
+            return sphereGeometryCache[radius];
+        }
+        
+        function getJointMaterial(color) {
+            if (!jointMaterialCache[color]) {
+                jointMaterialCache[color] = new THREE.MeshPhongMaterial({
+                    color: color,
+                    emissive: color,
+                    emissiveIntensity: 0.3
+                });
+            }
+            return jointMaterialCache[color];
+        }
+        
+        function getLineMaterial(color) {
+            if (!lineMaterialCache[color]) {
+                lineMaterialCache[color] = new THREE.LineBasicMaterial({ color: color, linewidth: 2 });
+            }
+            return lineMaterialCache[color];
+        }
+        
+        // 窗口2: 3D重建。只渲染后端 render_3d_indices 指定的子集（面部点不进 3D）
         function render3DView(frame) {
-            skeletonMeshes3D.forEach(mesh => scene3D.remove(mesh));
+            skeletonMeshes3D.forEach(mesh => {
+                scene3D.remove(mesh);
+                // 几何体与材质多为共享缓存，只需释放每帧新建的连线几何体
+                if (mesh.isLine) mesh.geometry.dispose();
+            });
             skeletonMeshes3D = [];
             
             const joints = frame.joints;
             if (!joints) return;
             
+            const topo = getTopology();
+            const renderSet = topo.render_3d_indices ? new Set(topo.render_3d_indices) : null;
+            const inRender = (idx) => renderSet === null || renderSet.has(idx);
+            
             // 绘制关键点
             joints.forEach((joint, idx) => {
-                const pos = joint.position || joint.get?.('position');
-                if (!pos || pos.length < 3) return;
+                if (!inRender(idx) || !isJointVisible(joint)) return;
+                const pos = jointPosition(joint);
+                if (pos.length < 3) return;
                 
-                const geometry = new THREE.SphereGeometry(0.05, 16, 16);
-                const material = new THREE.MeshPhongMaterial({ 
-                    color: getJointColor(idx),
-                    emissive: getJointColor(idx),
-                    emissiveIntensity: 0.3
-                });
-                const sphere = new THREE.Mesh(geometry, material);
+                const radius = SMALL_POINT_GROUPS.has(getJointGroup(idx)) ? 0.02 : 0.05;
+                const sphere = new THREE.Mesh(
+                    getSphereGeometry(radius),
+                    getJointMaterial(getJointColor(idx))
+                );
                 sphere.position.set(pos[0], -pos[1], pos[2]);
                 scene3D.add(sphere);
                 skeletonMeshes3D.push(sphere);
             });
             
             // 绘制骨骼连线
-            BONE_CONNECTIONS.forEach(([idx1, idx2]) => {
+            topo.bone_connections.forEach(([idx1, idx2]) => {
                 if (idx1 >= joints.length || idx2 >= joints.length) return;
+                if (!inRender(idx1) || !inRender(idx2)) return;
                 
                 const j1 = joints[idx1];
                 const j2 = joints[idx2];
-                const p1 = j1.position || j1.get?.('position');
-                const p2 = j2.position || j2.get?.('position');
+                if (!isJointVisible(j1) || !isJointVisible(j2)) return;
                 
-                if (!p1 || !p2) return;
+                const p1 = jointPosition(j1);
+                const p2 = jointPosition(j2);
+                if (p1.length < 3 || p2.length < 3) return;
                 
-                const points = [
+                const geometry = new THREE.BufferGeometry().setFromPoints([
                     new THREE.Vector3(p1[0], -p1[1], p1[2]),
                     new THREE.Vector3(p2[0], -p2[1], p2[2])
-                ];
-                
-                const geometry = new THREE.BufferGeometry().setFromPoints(points);
-                const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 });
-                const line = new THREE.Line(geometry, material);
+                ]);
+                const line = new THREE.Line(geometry, getLineMaterial(getJointColor(idx2)));
                 scene3D.add(line);
                 skeletonMeshes3D.push(line);
             });
-        }
-        
-        function getJointColor(index) {
-            const colors = [0xff0000, 0xff6600, 0xffff00, 0x00ff00, 0x00ffff, 0x0000ff, 0xff00ff, 0xffffff];
-            return colors[index % colors.length];
         }
         
         function updateFrameInfo() {

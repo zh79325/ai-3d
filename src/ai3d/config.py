@@ -5,10 +5,18 @@ Configuration management for AI 3D Animation Generator.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 # 项目根目录（src/ai3d/config.py -> ai3d -> src -> 项目根）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def resolve_model_path(path: str) -> str:
+    """把配置里的相对模型路径按项目根解析为绝对路径，避免受当前工作目录影响"""
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return str(candidate)
+    return str((PROJECT_ROOT / candidate).resolve())
 
 
 def default_output_dir() -> str:
@@ -21,12 +29,23 @@ def default_output_dir() -> str:
 
 @dataclass
 class ModelConfig:
-    """YOLO26 模型配置"""
-    pose_model: str = "./models/yolo26n-pose.pt"  # 使用本地模型
+    """姿态/深度模型配置"""
+    pose_backend: str = "dwpose"  # 'dwpose'(133 点全身) 或 'yolo'(COCO 17 点)
+    pose_model: str = "./models/yolo26n-pose.pt"  # pose_backend='yolo' 时使用
     depth_model: str = "./models/yolo26n-depth.pt"  # 使用本地深度模型
     device: str = "cpu"  # 'cpu', 'cuda', 'mps'
     confidence_threshold: float = 0.5
     img_size: int = 640
+
+    # --- DWPose (rtmlib Wholebody, balanced 档位) ---
+    # 两个 ONNX 由 scripts/download_models.py --dwpose 下载到本地，运行时不联网
+    dwpose_det_model: str = "./models/dwpose-det-yolox-m-640x640.onnx"
+    dwpose_pose_model: str = "./models/dwpose-pose-rtmw-x-l-192x256.onnx"
+    # 输入尺寸为 (宽, 高)，必须与上面的模型文件严格对应，否则关键点会整体错位
+    dwpose_det_input_size: Tuple[int, int] = (640, 640)
+    dwpose_pose_input_size: Tuple[int, int] = (192, 256)
+    dwpose_backend: str = "onnxruntime"  # 'onnxruntime', 'opencv', 'openvino'
+    dwpose_keypoint_threshold: float = 0.3  # 低于该置信度的关键点不参与绘制
 
 
 @dataclass
@@ -88,6 +107,9 @@ class Config:
         if 'model' in data:
             for key, value in data['model'].items():
                 if hasattr(config.model, key):
+                    # 输入尺寸在 YAML 里是列表，回填时转成 tuple 交给 rtmlib
+                    if key in ('dwpose_det_input_size', 'dwpose_pose_input_size'):
+                        value = tuple(value)
                     setattr(config.model, key, value)
                     
         if 'pipeline' in data:
@@ -113,11 +135,18 @@ class Config:
         
         data = {
             'model': {
+                'pose_backend': self.model.pose_backend,
                 'pose_model': self.model.pose_model,
                 'depth_model': self.model.depth_model,
                 'device': self.model.device,
                 'confidence_threshold': self.model.confidence_threshold,
                 'img_size': self.model.img_size,
+                'dwpose_det_model': self.model.dwpose_det_model,
+                'dwpose_pose_model': self.model.dwpose_pose_model,
+                'dwpose_det_input_size': list(self.model.dwpose_det_input_size),
+                'dwpose_pose_input_size': list(self.model.dwpose_pose_input_size),
+                'dwpose_backend': self.model.dwpose_backend,
+                'dwpose_keypoint_threshold': self.model.dwpose_keypoint_threshold,
             },
             'pipeline': {
                 'use_depth': self.pipeline.use_depth,

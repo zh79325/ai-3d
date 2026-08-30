@@ -13,17 +13,22 @@ os.environ.setdefault("YOLO_OFFLINE", "true")
 
 from ultralytics import YOLO
 
+from ai3d.config import resolve_model_path
+
 
 class BackgroundRemover:
     """基于 YOLO26 实例分割的视频背景移除器"""
     
-    def __init__(self, model_name: str = "yolo26n-seg.pt"):
-        # 优先使用 models 目录下的本地模型（项目根目录）
-        model_path = Path(__file__).parent.parent.parent.parent / "models" / model_name
-        if not model_path.exists():
-            model_path = model_name  # fallback to default path
+    def __init__(self, model_name: str = "./models/yolo26n-seg.pt"):
+        # 必须传本地绝对路径：只给文件名时 Ultralytics 会联网下载到当前工作目录
+        model_path = resolve_model_path(model_name)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"YOLO 分割模型缺失: {model_path}\n"
+                f"请先运行: python scripts/download_models.py"
+            )
         
-        self.model = YOLO(str(model_path))
+        self.model = YOLO(model_path)
         print(f"✅ YOLO26 实例分割模型已加载: {model_path}")
     
     def remove_frame(self, frame: np.ndarray, return_result: bool = False):

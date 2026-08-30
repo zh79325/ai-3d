@@ -13,6 +13,8 @@ def check_dependencies():
     
     required_packages = [
         ("ultralytics", "ultralytics"),
+        ("rtmlib", "rtmlib"),
+        ("onnxruntime", "onnxruntime"),
         ("opencv-python", "cv2"),
         ("numpy", "numpy"),
         ("torch", "torch"),
@@ -61,6 +63,36 @@ def check_models():
     return True
 
 
+def check_dwpose_models():
+    """检查 DWPose 的 ONNX 模型是否已下载到本地"""
+    print("\n🧍 检查 DWPose 模型文件...")
+    
+    try:
+        from ai3d.config import Config
+        config = Config()
+        onnx_paths = [
+            ("检测器", config.model.dwpose_det_model),
+            ("133 点姿态", config.model.dwpose_pose_model),
+        ]
+    except Exception as e:
+        print(f"  ❌ 配置加载失败: {e}")
+        return False
+    
+    all_ok = True
+    for label, path in onnx_paths:
+        if os.path.exists(path):
+            size_mb = os.path.getsize(path) / 1024 / 1024
+            print(f"  ✅ {label}: {path} ({size_mb:.1f} MB)")
+        else:
+            print(f"  ❌ {label} 缺失: {path}")
+            all_ok = False
+    
+    if not all_ok:
+        print("  请运行: python scripts/download_models.py --dwpose")
+    
+    return all_ok
+
+
 def check_config():
     """检查配置是否正确"""
     print("\n⚙️  检查配置...")
@@ -78,6 +110,7 @@ def check_config():
         
         print(f"  ✅ 设备: {config.model.device}")
         print(f"  ✅ 置信度阈值: {config.model.confidence_threshold}")
+        print(f"  ✅ 姿态后端: {config.model.pose_backend}")
         
         return True
     except Exception as e:
@@ -97,7 +130,8 @@ def main():
     results.append(("Python 依赖", check_dependencies()))
     
     # 检查模型
-    results.append(("模型文件", check_models()))
+    results.append(("YOLO 模型文件", check_models()))
+    results.append(("DWPose 模型文件", check_dwpose_models()))
     
     # 检查配置
     results.append(("配置文件", check_config()))
