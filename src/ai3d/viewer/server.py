@@ -60,17 +60,15 @@ def update_task(task_id: str, updates: Dict[str, Any]):
 
 
 def set_processing_status(status: Dict[str, Any]):
-    """兼容旧接口，更新当前活跃任务状态"""
-    # 找到正在处理的任务并更新
-    found = False
+    """兼容旧接口，更新当前活跃任务状态
+
+    有 task_id 的调用方已直接走 update_task，此处只兜底处理无任务上下文的场景，
+    找不到处理中的任务属正常情况，不作日志输出。
+    """
     for task_id, task in _tasks.items():
         if task["status"] == "processing":
             update_task(task_id, status)
-            found = True
-            print(f"[DEBUG] set_processing_status updated task {task_id}: {status.get('progress_percent', 'N/A')}%")
             break
-    if not found:
-        print(f"[DEBUG] set_processing_status: no processing task found. Tasks: {[(k, v['status']) for k, v in _tasks.items()]}")
 
 
 class SkeletonFrame(BaseModel):

@@ -208,8 +208,12 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     return str(json_path)
 
 
-def launch_standalone(video_path: str, port: int = 8765):
-    """独立模式: 先启动服务器,再后台处理视频"""
+def launch_standalone(video_path: str = None, port: int = 8765):
+    """独立模式: 启动服务器
+
+    video_path 为 None 时只起服务，视频处理由页面上传触发（默认行为）。
+    仅当显式传入 video_path 时，才在后台线程里预处理该视频。
+    """
     
     import uvicorn
     import threading
@@ -222,24 +226,38 @@ def launch_standalone(video_path: str, port: int = 8765):
     # 1. 先创建并启动FastAPI应用
     app = create_app()
     
-    # 2. 在后台线程中处理视频
-    def process_video_background():
-        try:
-            json_path = process_video_to_json(video_path)
-            if json_path:
-                from ai3d.viewer import load_animation_from_json, set_animation_data
-                data = load_animation_from_json(json_path)
-                set_animation_data(data)
-                print(f"\n✅ 动画数据已加载: {len(data['skeletons'])} 帧")
-                print(f"   刷新浏览器即可看到3D骨骼动画\n")
-        except Exception as e:
-            print(f"\n❌ 视频处理失败: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # 启动后台处理线程
-    bg_thread = threading.Thread(target=process_video_background, daemon=True)
-    bg_thread.start()
+    # 2. 只有显式指定视频时才预处理；否则等页面上传
+    if video_path:
+        from ai3d.viewer import create_task, update_task
+        
+        # 建一个真实任务，进度才能出现在页面任务列表里
+        task_id = create_task(os.path.basename(video_path))
+        update_task(task_id, {
+            "status": "processing",
+            "message": "正在加载视频...",
+            "video_path": video_path
+        })
+        
+        def process_video_background():
+            try:
+                json_path = process_video_to_json(video_path, task_id=task_id)
+                if json_path:
+                    from ai3d.viewer import load_animation_from_json, set_animation_data
+                    data = load_animation_from_json(json_path)
+                    set_animation_data(data)
+                    update_task(task_id, {"animation_data": data, "json_path": json_path})
+                    print(f"\n✅ 动画数据已加载: {len(data['skeletons'])} 帧")
+                    print(f"   刷新浏览器即可看到3D骨骼动画\n")
+            except Exception as e:
+                update_task(task_id, {"status": "failed", "message": f"处理失败: {e}"})
+                print(f"\n❌ 视频处理失败: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        bg_thread = threading.Thread(target=process_video_background, daemon=True)
+        bg_thread.start()
+    else:
+        print("   等待页面上传视频...\n")
     
     # 3. 主线程运行uvicorn(阻塞)
     try:
@@ -287,14 +305,15 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="AI 3D Skeleton Viewer Launcher")
-    parser.add_argument("video_path", help="输入视频路径")
+    parser.add_argument("video_path", nargs="?", default=None,
+                       help="可选的输入视频路径。不传则只起服务，由页面上传触发处理")
     parser.add_argument("--port", type=int, default=8765, help="服务器端口 (默认: 8765)")
     parser.add_argument("--mode", choices=["standalone", "integrate"], 
                        default="standalone", help="运行模式")
     
     args = parser.parse_args()
     
-    if not os.path.exists(args.video_path):
+    if args.video_path and not os.path.exists(args.video_path):
         print(f"❌ 视频文件不存在: {args.video_path}")
         sys.exit(1)
     
