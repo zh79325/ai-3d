@@ -25,6 +25,11 @@ class PipelineConfig:
     remove_background: bool = False  # 是否启用背景移除
     smooth_frames: int = 5  # 平滑滤波窗口大小
     fps_override: Optional[int] = None  # 如果为 None,使用视频原始 FPS
+    render_annotated_video: bool = True  # 是否用 YOLO 原生 plot 生成标注视频
+    annotate_masks: bool = True  # 标注视频中绘制实例分割掩码（需 remove_background=True 才有分割结果）
+    annotate_pose: bool = True  # 标注视频中绘制骨骼关键点
+    annotate_mask_alpha: float = 0.45  # 掩码混合系数，越小越能看清原画面
+    annotated_video_name: str = "annotated.mp4"  # 标注视频文件名
 
 
 @dataclass
@@ -87,6 +92,11 @@ class Config:
                 'remove_background': self.pipeline.remove_background,
                 'smooth_frames': self.pipeline.smooth_frames,
                 'fps_override': self.pipeline.fps_override,
+                'render_annotated_video': self.pipeline.render_annotated_video,
+                'annotate_masks': self.pipeline.annotate_masks,
+                'annotate_pose': self.pipeline.annotate_pose,
+                'annotate_mask_alpha': self.pipeline.annotate_mask_alpha,
+                'annotated_video_name': self.pipeline.annotated_video_name,
             },
             'export': {
                 'output_format': self.export.output_format,

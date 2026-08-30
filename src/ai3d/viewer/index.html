@@ -430,9 +430,9 @@
         <div class="preview-area">
             <!-- 三窗口预览网格 -->
             <div class="preview-grid">
-                <!-- 窗口1: 原视频 + 骨骼叠加 -->
+                <!-- 窗口1: 原视频 + YOLO 标注（后端烧录） -->
                 <div class="preview-window">
-                    <div class="preview-header"> 原视频 + 骨骼叠加</div>
+                    <div class="preview-header"> 原视频 + YOLO 标注（骨骼/分割）</div>
                     <div class="preview-content" id="preview-video-overlay">
                         <canvas id="canvas-overlay"></canvas>
                     </div>
@@ -486,6 +486,8 @@
         
         // 视频元素（用于窗口1）
         let videoElement = null;
+        // 是否直接播放后端烧录好的标注视频（无需前端叠加）
+        let useAnnotatedVideo = false;
         
         // Canvas 上下文
         let ctxOverlay = null;
@@ -600,6 +602,9 @@
             document.getElementById('speed-slider').addEventListener('input', function() {
                 playbackSpeed = parseFloat(this.value);
                 document.getElementById('speed-value').textContent = playbackSpeed + 'x';
+                if (useAnnotatedVideo && videoElement) {
+                    videoElement.playbackRate = playbackSpeed;
+                }
                 if (isPlaying) {
                     stopPlayback();
                     startPlayback();
@@ -821,20 +826,43 @@
         }
         
         // 加载视频到窗口1
+        // 优先直接播放后端用 YOLO 原生 plot 烧录的标注视频（坐标天然对齐），
+        // 无标注视频时回退到“原视频 + Canvas 叠加”旧方式
         function loadVideoToWindow(taskId) {
             const container = document.getElementById('preview-video-overlay');
+            const canvas = document.getElementById('canvas-overlay');
             
             // 移除可能存在的旧video元素，只保留canvas
             const oldVideo = container.querySelector('video');
             if (oldVideo) oldVideo.remove();
             
+            useAnnotatedVideo = !!(animationData && animationData.has_annotated_video);
+            
             let video = document.createElement('video');
             video.muted = true;
             video.loop = false;
-            video.style.display = 'none'; // 隐藏video，仅用于Canvas绘制源
+            video.playsInline = true;
             container.appendChild(video);
             
-            video.src = `/api/skeleton-viewer/video/${taskId}`;
+            if (useAnnotatedVideo) {
+                // 标注视频直接可见，canvas 不再绘制叠加层
+                canvas.classList.add('hidden');
+                video.controls = false;
+                video.src = `/api/skeleton-viewer/video/${taskId}/annotated`;
+                video.addEventListener('error', () => {
+                    console.warn('标注视频加载失败，回退到 Canvas 叠加模式');
+                    useAnnotatedVideo = false;
+                    canvas.classList.remove('hidden');
+                    video.style.display = 'none';
+                    video.src = `/api/skeleton-viewer/video/${taskId}`;
+                    video.load();
+                }, { once: true });
+            } else {
+                canvas.classList.remove('hidden');
+                video.style.display = 'none'; // 隐藏video，仅用于Canvas绘制源
+                video.src = `/api/skeleton-viewer/video/${taskId}`;
+            }
+            
             video.load();
             videoElement = video;
         }
@@ -854,8 +882,10 @@
             updateFrameInfo();
         }
         
-        // 窗口1: 原视频 + 骨骼叠加
+        // 窗口1: 原视频 + 骨骼叠加（仅回退模式下使用，标注视频模式无需绘制）
         function renderOverlayView(frameIndex, frame) {
+            if (useAnnotatedVideo) return;
+            
             const canvas = document.getElementById('canvas-overlay');
             const ctx = ctxOverlay;
             if (!ctx) return;
@@ -911,27 +941,21 @@
         }
         
         // 在Canvas上绘制骨骼
+        // 坐标统一按“视频原始分辨率 → canvas contain 居中”映射，
+        // 不再用包围盒自适应缩放（那会把骨骼拉伸到整张画布、与视频错位）
         function drawSkeletonOnCanvas(ctx, frame, canvasW, canvasH, withBackground) {
             const joints = frame.joints;
             if (!joints || joints.length === 0) return;
             
-            // 计算边界框以自适应缩放
-            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-            joints.forEach(j => {
-                const pos = j.position || j.get?.('position') || [0, 0, 0];
-                if (pos[0] < minX) minX = pos[0];
-                if (pos[0] > maxX) maxX = pos[0];
-                if (pos[1] < minY) minY = pos[1];
-                if (pos[1] > maxY) maxY = pos[1];
-            });
+            const srcW = (animationData && animationData.width) || 1920;
+            const srcH = (animationData && animationData.height) || 1080;
             
-            const rangeX = maxX - minX || 1;
-            const rangeY = maxY - minY || 1;
-            const padding = 40;
-            const scale = Math.min((canvasW - padding * 2) / rangeX, (canvasH - padding * 2) / rangeY);
+            const scale = Math.min(canvasW / srcW, canvasH / srcH);
+            const offsetX = (canvasW - srcW * scale) / 2;
+            const offsetY = (canvasH - srcH * scale) / 2;
             
-            const toScreenX = (x) => padding + (x - minX) * scale;
-            const toScreenY = (y) => padding + (y - minY) * scale;
+            const toScreenX = (x) => offsetX + x * scale;
+            const toScreenY = (y) => offsetY + y * scale;
             
             // 绘制连线
             ctx.strokeStyle = '#00ff00';
@@ -1035,6 +1059,12 @@
             btn.textContent = '⏸ 暂停';
             btn.classList.add('playing');
             
+            // 标注视频模式下由 video 元素自己播，作为主时钟
+            if (useAnnotatedVideo && videoElement) {
+                videoElement.playbackRate = playbackSpeed;
+                videoElement.play().catch(err => console.warn('视频播放失败:', err));
+            }
+            
             startPlayback();
         }
         
@@ -1043,16 +1073,29 @@
             const interval = (1000 / fps) / playbackSpeed;
             
             playInterval = setInterval(() => {
+                if (useAnnotatedVideo && videoElement && videoElement.readyState >= 2) {
+                    // 以标注视频的播放进度为准，反推当前帧，保证三个窗口同步
+                    if (videoElement.ended) {
+                        videoElement.currentTime = 0;
+                        videoElement.play().catch(() => {});
+                    }
+                    currentFrame = Math.min(
+                        totalFrames - 1,
+                        Math.max(0, Math.round(videoElement.currentTime * fps))
+                    );
+                    renderAllViews(currentFrame);
+                    return;
+                }
+                
                 currentFrame++;
                 if (currentFrame >= totalFrames) {
                     currentFrame = 0;
                 }
                 renderAllViews(currentFrame);
                 
-                // 同步视频播放
+                // 同步视频播放（回退模式：按帧号/fps 定位，比按时长比例更准）
                 if (videoElement && videoElement.readyState >= 2) {
-                    const videoTime = (currentFrame / totalFrames) * videoElement.duration;
-                    videoElement.currentTime = videoTime;
+                    videoElement.currentTime = currentFrame / fps;
                 }
             }, interval);
         }
@@ -1060,6 +1103,10 @@
         function pause() {
             isPlaying = false;
             stopPlayback();
+            
+            if (useAnnotatedVideo && videoElement) {
+                videoElement.pause();
+            }
             
             const btn = document.getElementById('btn-play-toggle');
             btn.textContent = '▶ 播放';

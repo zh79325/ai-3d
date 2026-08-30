@@ -33,24 +33,27 @@ class PoseEstimator:
             "left_knee", "right_knee", "left_ankle", "right_ankle"
         ]
 
-    def estimate_frame(self, frame: np.ndarray) -> Optional[Skeleton]:
+    def estimate_frame(self, frame: np.ndarray, return_result: bool = False):
         """
         对单帧图像进行姿态估计。
         
         Args:
             frame: BGR 格式的图像数组
+            return_result: 为 True 时额外返回 Ultralytics 原始 Results 对象（供 plot 标注使用）
             
         Returns:
-            Skeleton 对象，如果未检测到人则返回 None
+            Skeleton 对象（未检测到人时为 None）；
+            return_result=True 时返回 (Skeleton, Results) 元组
         """
         results = self.model(frame, verbose=False, device=self.device)
+        raw_result = results[0] if results else None
         
         if not results or not results[0].keypoints:
-            return None
+            return (None, raw_result) if return_result else None
             
         keypoints_data = results[0].keypoints.data.cpu().numpy()
         if len(keypoints_data) == 0:
-            return None
+            return (None, raw_result) if return_result else None
             
         # 取置信度最高的那个人
         best_person = keypoints_data[0] 
@@ -65,24 +68,28 @@ class PoseEstimator:
                     "confidence": float(conf)
                 })
                 
-        return Skeleton(joints=joints)
+        skeleton = Skeleton(joints=joints)
+        return (skeleton, raw_result) if return_result else skeleton
     
-    def estimate_batch(self, frames: List[np.ndarray]) -> List[Optional[Skeleton]]:
+    def estimate_batch(self, frames: List[np.ndarray], return_results: bool = False):
         """
         批量处理多帧图像。
         
         Args:
             frames: BGR 格式的图像数组列表
+            return_results: 为 True 时额外返回每帧的 Ultralytics 原始 Results 列表
             
         Returns:
-            Skeleton 对象列表
+            Skeleton 对象列表；return_results=True 时返回 (skeletons, raw_results) 元组
         """
         skeletons = []
+        raw_results = []
         for i, frame in enumerate(frames):
-            skeleton = self.estimate_frame(frame)
+            skeleton, raw_result = self.estimate_frame(frame, return_result=True)
             skeletons.append(skeleton)
+            raw_results.append(raw_result)
             
             if (i + 1) % 10 == 0:
                 print(f"已处理 {i + 1}/{len(frames)} 帧")
                 
-        return skeletons
+        return (skeletons, raw_results) if return_results else skeletons

@@ -4,6 +4,8 @@ Motion Capture Pipeline.
 """
 
 from typing import List, Optional
+from pathlib import Path
+import cv2
 import numpy as np
 from ai3d.core.pose_estimator import PoseEstimator
 from ai3d.core.depth_estimator import DepthEstimator
@@ -12,6 +14,7 @@ from ai3d.utils.coordinate import convert_skeleton_to_3d
 from ai3d.models.skeleton import Skeleton
 from ai3d.config import Config
 from ai3d.pipeline.background_remover import BackgroundRemover
+from ai3d.pipeline.video_annotator import VideoAnnotator
 
 
 class MotionCapturePipeline:
@@ -74,6 +77,25 @@ class MotionCapturePipeline:
             print(f"已提取 {len(frames)} 帧")
             report_progress("frame_extract", len(frames), len(frames), f"帧提取完成 ({len(frames)}帧)")
             
+            # 标注视频写入器（把 YOLO 原生 plot 结果烧进原视频帧）
+            annotator = None
+            annotated_video_path = None
+            original_frames = frames  # 标注底图始终用原始帧,不用背景移除后的帧
+            annotated_bases = None
+            if self.config.pipeline.render_annotated_video and frames:
+                annotated_video_path = str(
+                    Path(output_dir) / self.config.pipeline.annotated_video_name
+                )
+                annotator = VideoAnnotator(
+                    annotated_video_path,
+                    fps=reader.fps,
+                    width=reader.width,
+                    height=reader.height,
+                    draw_masks=self.config.pipeline.annotate_masks,
+                    draw_pose=self.config.pipeline.annotate_pose,
+                    mask_alpha=self.config.pipeline.annotate_mask_alpha,
+                )
+            
             # 步骤2.5: 背景移除（如果启用）
             if self.config.pipeline.remove_background:
                 total_frames = len(frames)
@@ -81,12 +103,22 @@ class MotionCapturePipeline:
                 
                 bg_remover = BackgroundRemover()
                 frames_with_alpha = []
+                # 分割掩码在这一步就合成进标注底图,避免为标注再跑一遍分割模型
+                if annotator is not None and self.config.pipeline.annotate_masks:
+                    annotated_bases = []
                 
                 for i, frame in enumerate(frames):
-                    rgba_frame = bg_remover.remove_frame(frame)
-                    # 将 RGBA 转回 BGR（保留 alpha 用于后续处理）
-                    bgr_frame = cv2.cvtColor(rgba_frame[:, :, :3], cv2.COLOR_RGB2BGR)
+                    rgba_frame, seg_result = bg_remover.remove_frame(frame, return_result=True)
+                    # 用 alpha 通道把背景抹黑,再转回 BGR 供姿态估计使用
+                    alpha = (rgba_frame[:, :, 3:4] > 0).astype(np.uint8)
+                    rgb_frame = rgba_frame[:, :, :3] * alpha
+                    bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
                     frames_with_alpha.append(bgr_frame)
+                    
+                    if annotated_bases is not None:
+                        annotated_bases.append(
+                            annotator.compose_frame(frame, seg_result=seg_result)
+                        )
                     
                     if (i + 1) % 10 == 0 or i == total_frames - 1:
                         report_progress("bg_remove", i + 1, total_frames, 
@@ -106,8 +138,17 @@ class MotionCapturePipeline:
             batch_size = 10
             for i in range(0, total_frames, batch_size):
                 batch = frames[i:i+batch_size]
-                batch_skeletons = self.pose_estimator.estimate_batch(batch)
+                batch_skeletons, batch_results = self.pose_estimator.estimate_batch(
+                    batch, return_results=True
+                )
                 skeletons_2d.extend(batch_skeletons)
+                
+                # 关键点直接叠加到底图上并写入标注视频,坐标与原视频像素严格一致
+                if annotator is not None:
+                    for j, pose_result in enumerate(batch_results):
+                        idx = i + j
+                        base = annotated_bases[idx] if annotated_bases else original_frames[idx]
+                        annotator.write(base, pose_result=pose_result)
                 
                 processed = min(i + batch_size, total_frames)
                 report_progress("pose_estimate", processed, total_frames, 
@@ -115,6 +156,12 @@ class MotionCapturePipeline:
             
             report_progress("pose_estimate", total_frames, total_frames, 
                           f"姿态估计完成 ({total_frames}帧)")
+            
+            if annotator is not None:
+                annotated_video_path = annotator.close()
+                annotated_bases = None  # 及时释放底图内存
+                if annotated_video_path:
+                    print(f"✅ 标注视频已生成: {annotated_video_path}")
             
             # 步骤4: 如果有深度估计器,转换为 3D
             skeletons_3d = []
@@ -171,6 +218,7 @@ class MotionCapturePipeline:
         
         result = {
             "video_path": video_path,
+            "annotated_video_path": annotated_video_path,
             "total_frames": len(frames),
             "valid_frames": len(valid_frames),
             "fps": reader.fps,

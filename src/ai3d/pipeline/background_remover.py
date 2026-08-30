@@ -26,25 +26,25 @@ class BackgroundRemover:
         self.model = YOLO(str(model_path))
         print(f"✅ YOLO26 实例分割模型已加载: {model_path}")
     
-    def remove_frame(self, frame: np.ndarray) -> np.ndarray:
+    def remove_frame(self, frame: np.ndarray, return_result: bool = False):
         """
         移除单帧背景
         Args:
             frame: BGR 格式的 OpenCV 图像 (H, W, 3)
+            return_result: 为 True 时额外返回 Ultralytics 原始 Results 对象（供 plot 标注使用）
         Returns:
-            RGBA 格式的图像 (H, W, 4)，背景为透明
+            RGBA 格式的图像 (H, W, 4)，背景为透明；
+            return_result=True 时返回 (rgba, Results) 元组
         """
-        # YOLO 需要 RGB 输入
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # 运行实例分割
-        results = self.model(rgb_frame, verbose=False)
+        # Ultralytics 对 numpy 输入按 BGR 处理，直接传原帧，不要先转 RGB
+        results = self.model(frame, verbose=False)
         result = results[0]
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
         # 如果没有检测到任何对象，返回原图（带全不透明 alpha）
         if result.masks is None or len(result.masks.data) == 0:
             rgba = np.concatenate([rgb_frame, np.ones((frame.shape[0], frame.shape[1], 1), dtype=np.uint8) * 255], axis=2)
-            return rgba
+            return (rgba, result) if return_result else rgba
         
         # 合并所有检测到的实例掩码（人物 + 道具）
         # masks.data shape: (N, H, W), dtype uint8, values 0 or 1
@@ -60,7 +60,7 @@ class BackgroundRemover:
         rgba[:, :, :3] = rgb_frame
         rgba[:, :, 3] = combined_mask
         
-        return rgba
+        return (rgba, result) if return_result else rgba
     
     def process_video(
         self,
@@ -109,9 +109,10 @@ class BackgroundRemover:
             # 移除背景
             rgba_frame = self.remove_frame(frame)
             
-            # 保存为 PNG（保留透明度）
+            # 保存为 PNG（保留透明度，cv2 需要 BGRA 通道序）
+            bgra_frame = cv2.cvtColor(rgba_frame, cv2.COLOR_RGBA2BGRA)
             output_file = output_path / f"frame_{frame_idx:06d}.png"
-            cv2.imwrite(str(output_file), rgba_frame)
+            cv2.imwrite(str(output_file), bgra_frame)
             frame_paths.append(str(output_file))
             
             frame_idx += 1

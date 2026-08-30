@@ -276,6 +276,7 @@ async def process_video_endpoint(file: UploadFile = File(...)):
                 
                 if json_path:
                     data = load_animation_from_json(json_path)
+                    task = get_task(task_id) or {}
                     
                     # 保留视频文件供前端播放使用，不再删除
                     update_task(task_id, {
@@ -286,7 +287,9 @@ async def process_video_endpoint(file: UploadFile = File(...)):
                         "message": "处理完成！",
                         "animation_data": data,
                         "json_path": json_path,
-                        "video_path": temp_video_path  # 保存视频路径供前端流式传输
+                        "video_path": temp_video_path,  # 保存视频路径供前端流式传输
+                        # 标注视频由 pipeline 写入 temp_dir，launch_viewer 已回写该字段
+                        "annotated_video_path": task.get("annotated_video_path")
                     })
                 else:
                     update_task(task_id, {
@@ -365,7 +368,7 @@ async def list_tasks():
 
 @router.get("/video/{task_id}")
 async def stream_video(task_id: str):
-    """流式传输任务关联的视频文件"""
+    """流式传输任务关联的原始视频文件"""
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -378,6 +381,24 @@ async def stream_video(task_id: str):
         video_path,
         media_type="video/mp4",
         filename=os.path.basename(video_path)
+    )
+
+
+@router.get("/video/{task_id}/annotated")
+async def stream_annotated_video(task_id: str):
+    """流式传输已烧入 YOLO 检测结果（骨骼 + 实例分割）的标注视频"""
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    annotated_path = task.get("annotated_video_path")
+    if not annotated_path or not os.path.exists(annotated_path):
+        raise HTTPException(status_code=404, detail="Annotated video not found")
+    
+    return FileResponse(
+        annotated_path,
+        media_type="video/mp4",
+        filename=os.path.basename(annotated_path)
     )
 
 

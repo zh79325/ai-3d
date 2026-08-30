@@ -135,9 +135,20 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
     from ai3d.config import Config
     config = Config()
     config.pipeline.remove_background = True  # 启用背景移除
-    
+
+    # 输出目录（标注视频与 JSON 都放这里）
+    if output_dir is None:
+        output_dir = project_root / "output"
+    else:
+        output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     pipeline = MotionCapturePipeline(config)
-    result = pipeline.process_video(video_path, progress_callback=progress_callback)
+    result = pipeline.process_video(
+        video_path,
+        output_dir=str(output_dir),
+        progress_callback=progress_callback
+    )
     
     if not result['skeletons']:
         print("❌ 未检测到有效姿态")
@@ -179,6 +190,11 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
                 })
         
         if skeleton is None:
+            # 空帧也占位，保证数组下标与视频帧号一一对应
+            skeletons_data.append({
+                'frame_index': i,
+                'joints': []
+            })
             continue
         
         # 转换为字典格式
@@ -205,16 +221,10 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
         'fps': result.get('fps', 30.0),
         'width': result.get('width', 1920),
         'height': result.get('height', 1080),
+        'valid_frames': result.get('valid_frames', 0),
+        'has_annotated_video': bool(result.get('annotated_video_path')),
         'skeletons': skeletons_data
     }
-    
-    # 保存为JSON文件
-    if output_dir is None:
-        output_dir = project_root / "output"
-    else:
-        output_dir = Path(output_dir)
-    
-    output_dir.mkdir(exist_ok=True)
     
     json_path = output_dir / "animation_data.json"
     with open(json_path, 'w', encoding='utf-8') as f:
@@ -241,7 +251,8 @@ def process_video_to_json(video_path: str, output_dir: str = None, task_id: str 
             "progress_percent": 100.0,
             "message": "处理完成！",
             "animation_data": animation_data,
-            "json_path": str(json_path)
+            "json_path": str(json_path),
+            "annotated_video_path": result.get('annotated_video_path')
         })
     
     return str(json_path)
