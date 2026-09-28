@@ -30,10 +30,12 @@
   .chk { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--fg); margin:6px 0; }
   .chk input { width:auto; }
   #canvasWrap { position:absolute; inset:0; }
+  #canvasWrap canvas { display:block; width:100%; height:100%; }
   #overlay { position:absolute; left:12px; top:12px; background:rgba(20,22,26,.82); border:1px solid var(--line);
              border-radius:8px; padding:10px 12px; max-width:340px; backdrop-filter:blur(6px); }
   .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; }
   .b-QUEUED,.b-RUNNING { background:#2a3550; color:#8fb6ff; }
+  .b-CREATED { background:#2a2f3a; color:#9aa3b2; }
   .b-WAITING { background:#3a3320; color:var(--warn); }
   .b-DONE { background:#173a2a; color:var(--ok); }
   .b-FAILED { background:#3a1c1c; color:var(--err); }
@@ -54,6 +56,18 @@
   #animBar { position:absolute; left:12px; bottom:12px; background:rgba(20,22,26,.82); border:1px solid var(--line);
              border-radius:8px; padding:8px 10px; display:none; gap:8px; align-items:center; }
   #animBar input[type=range] { width:200px; }
+  #viewBar { position:absolute; right:12px; top:12px; display:flex; gap:6px; background:rgba(20,22,26,.82);
+    border:1px solid var(--line); border-radius:8px; padding:6px; }
+  #viewBar button { flex:0 0 auto; padding:6px 10px; font-size:12px; }
+  #viewBar button.on { background:var(--acc); color:#081018; border-color:var(--acc); }
+  #miniPanel { position:absolute; right:12px; top:52px; width:264px; background:rgba(20,22,26,.92);
+    border:1px solid var(--line); border-radius:10px; padding:8px; z-index:5; }
+  #miniHead { display:flex; justify-content:space-between; align-items:center; font-size:12px;
+    color:var(--mut); margin-bottom:6px; }
+  #miniHead button { padding:2px 8px; font-size:11px; flex:0 0 auto; }
+  #miniWrap { width:248px; height:248px; }
+  #miniWrap canvas { display:block; width:100%; height:100%; }
+  #btnMiniToggle { position:absolute; right:12px; bottom:12px; padding:6px 10px; font-size:12px; }
   .spin { display:inline-block; width:11px; height:11px; border:2px solid var(--mut); border-top-color:var(--acc);
           border-radius:50%; animation:sp .8s linear infinite; vertical-align:-1px; }
   @keyframes sp { to { transform:rotate(360deg); } }
@@ -73,39 +87,85 @@
     <h1>🎯 3D 骨骼动画迁移工具</h1>
     <div class="muted">前端只渲染；后端做归一化与全部算法。3D 数据统一 GLB。</div>
 
-    <h2>新建任务</h2>
-    <div class="card">
-      <label>源文件（已绑定骨骼动画，FBX/GLB）</label>
-      <input type="file" id="srcFile" accept=".fbx,.glb,.gltf" />
-      <label>目标文件（无骨骼网格，FBX/GLB）</label>
-      <input type="file" id="tgtFile" accept=".fbx,.glb,.gltf" />
-      <div class="row">
-        <div><label>FPS（0=沿用源）</label><input type="number" id="cfgFps" value="0" min="0" /></div>
+    <!-- 视图一：任务列表 -->
+    <div id="viewList">
+      <div class="row" style="justify-content:space-between;align-items:center;margin:14px 0 8px">
+        <h2 style="margin:0">任务列表</h2>
+        <button id="btnShowNew">＋ 新建任务</button>
       </div>
-      <div class="chk"><input type="checkbox" id="cfgAI" checked /><span>启用姿态 AI（DWPose/YOLO）</span></div>
-      <div class="chk"><input type="checkbox" id="cfgFoot" checked /><span>脚部锁定</span></div>
-      <div class="row" style="margin-top:8px">
-        <button id="btnCreate">上传并创建任务</button>
-        <button id="btnRefreshList" class="ghost">刷新列表</button>
+      <div class="card" id="newTaskCard" style="display:none">
+        <label>任务名称</label>
+        <input type="text" id="newTaskName" placeholder="例如：走路动画迁移" />
+        <div class="row" style="margin-top:8px">
+          <button id="btnCreateEmpty">创建</button>
+          <button id="btnCancelNew" class="ghost">取消</button>
+        </div>
+        <div id="newMsg" class="muted" style="margin-top:6px"></div>
       </div>
-      <div id="createMsg" class="muted" style="margin-top:6px"></div>
+      <div class="card" id="taskList"><div class="muted">暂无任务</div></div>
     </div>
 
-    <h2>当前任务</h2>
-    <div class="card">
-      <div class="row">
-        <input type="text" id="taskIdInput" placeholder="task_id（可粘贴历史任务）" />
-        <button id="btnOpen" class="ghost" style="flex:0 0 auto">打开</button>
+    <!-- 视图二：任务详情 -->
+    <div id="viewDetail" style="display:none">
+      <div class="row" style="justify-content:space-between;align-items:center;margin:14px 0 8px">
+        <button id="btnBackList" class="ghost">← 返回列表</button>
+        <span class="badge" id="detailState">-</span>
       </div>
-      <div id="taskInfo" style="margin-top:8px"></div>
-      <div id="downloads"></div>
+      <h2 id="detailTitle" style="margin:0 0 8px">任务</h2>
+
+      <div class="card">
+        <label>① 模型（目标：无骨骼网格 FBX/GLB）</label>
+        <div id="tgtPick">
+          <input type="file" id="tgtFile" accept=".fbx,.glb,.gltf" />
+          <div class="row" style="margin-top:6px"><button id="btnUploadTarget">上传模型</button></div>
+        </div>
+        <div id="tgtDone" style="display:none">
+          <div class="muted" id="tgtName"></div>
+          <div class="row" style="margin-top:6px">
+            <button id="btnDetect">🦴 绑定骨骼</button>
+            <button id="btnRetargetReupload" class="ghost">重新上传</button>
+          </div>
+        </div>
+        <div id="tgtMsg" class="muted" style="margin-top:6px"></div>
+      </div>
+
+      <div class="card">
+        <label>② 动画（源：已绑定骨骼动画 FBX/GLB）</label>
+        <div id="srcPick">
+          <input type="file" id="srcFile" accept=".fbx,.glb,.gltf" />
+          <div class="row" style="margin-top:6px"><button id="btnUploadSource">上传动画</button></div>
+        </div>
+        <div id="srcDone" style="display:none">
+          <div class="muted" id="srcName"></div>
+          <div class="row" style="margin-top:6px">
+            <button id="btnMigrate">🎬 开始迁移</button>
+            <button id="btnSourceReupload" class="ghost">重新上传</button>
+          </div>
+        </div>
+        <div id="srcMsg" class="muted" style="margin-top:6px"></div>
+      </div>
+
+      <div class="card" id="reviewCard" style="display:none">
+        <label>⚠️ 人工审核（EXPORT_VERIFY 门控）</label>
+        <div id="reviewReasons" class="muted" style="font-size:12px"></div>
+        <div class="muted" style="font-size:12px;margin-top:4px">目视审核：主画布切「合并/骨骼」看骨骼是否套在模型内</div>
+        <div class="row" style="margin-top:6px">
+          <button id="btnForceExport">✅ 通过并导出</button>
+          <button id="btnResolve" class="ghost">🔁 重跑求解</button>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <button id="btnReviewView" class="ghost">👁 审核对比视图</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div id="taskInfo"></div>
+        <div id="downloads"></div>
+      </div>
+
+      <h2 style="margin:14px 0 8px">日志</h2>
+      <div class="card"><div id="log" class="log"></div></div>
     </div>
-
-    <h2>历史任务</h2>
-    <div class="card" id="taskList"><div class="muted">暂无</div></div>
-
-    <h2>日志</h2>
-    <div class="card"><div id="log" class="log"></div></div>
   </div>
 
   <div id="main">
@@ -114,11 +174,22 @@
       <div id="ovTitle" class="muted">未加载模型</div>
       <div id="ovStatus" style="margin-top:4px"></div>
     </div>
+    <div id="viewBar">
+      <button data-mode="mesh" class="ghost">模型</button>
+      <button data-mode="bone" class="ghost">骨骼</button>
+      <button data-mode="both" class="ghost">合并</button>
+      <button id="btnCmp" class="ghost">对比源骨骼</button>
+    </div>
     <div id="animBar">
       <button id="btnPlay" class="ghost">⏸ 暂停</button>
       <input type="range" id="scrub" min="0" max="1000" value="0" />
       <span id="animTime" class="muted">0.00s</span>
     </div>
+    <div id="miniPanel" style="display:none">
+      <div id="miniHead"><span>🎬 源动画预览</span><button id="btnMiniClose" class="ghost">✕</button></div>
+      <div id="miniWrap"></div>
+    </div>
+    <button id="btnMiniToggle" class="ghost">🎬 动画预览</button>
   </div>
 </div>
 
@@ -144,11 +215,23 @@ const dl = new THREE.DirectionalLight(0xffffff, 0.7); dl.position.set(3, 6, 4); 
 const grid = new THREE.GridHelper(6, 24, 0x313845, 0x22272f); scene.add(grid);
 
 let mixer = null, clipAction = null, curModel = null;
+let rigGroup = null, rigTaskId = null, viewMode = 'both';
+// 迷你窗状态必须在 animate() 首次调用前声明（let 有 TDZ，后置会令整个 module 报错中断）
+let miniRenderer = null, miniScene = null, miniCam = null, miniControls = null;
+let miniMixer = null, miniModel = null, miniTaskId = null, miniHelper = null;
+// 源骨骼并排对比（主画布右侧）
+let cmpGroup = null, cmpMixer = null, cmpHelper = null, cmpOn = false;
+// 审核对比视图：四联一排 ①源+骨骼 ②源纯骨骼 ③绑定骨骼 ④绑定骨骼+目标
+let rvOn = false, rvParts = [], curRig = null;
+const modelOffset = new THREE.Vector3();
 const clock = new THREE.Clock();
 
 function resize() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
-  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+  // 必须同步 CSS 尺寸（updateStyle 默认 true）：否则 HiDPI 下画布按 2x 内在尺寸溢出，
+  // 只能看到渲染图的左上 1/4，居中模型会显得被甩到右下角
+  renderer.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize); resize();
 
@@ -156,8 +239,14 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
   if (mixer) mixer.update(dt);
+  if (miniMixer) miniMixer.update(dt);
+  if (cmpMixer) cmpMixer.update(dt);
   controls.update();
   renderer.render(scene, camera);
+  if (miniRenderer && document.getElementById('miniPanel').style.display !== 'none') {
+    miniControls.update();
+    miniRenderer.render(miniScene, miniCam);
+  }
   if (clipAction) {
     const t = clipAction.time % (clipAction.getClip().duration || 1);
     document.getElementById('animTime').textContent = t.toFixed(2) + 's';
@@ -172,6 +261,7 @@ function clearModel() {
   document.getElementById('animBar').style.display = 'none';
 }
 function frameObject(obj) {
+  obj.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(obj);
   const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(s.x, s.y, s.z) || 1;
@@ -184,7 +274,18 @@ function loadPreview(url, { play = false } = {}) {
   return new Promise((resolve, reject) => {
     loader.load(url, (gltf) => {
       clearModel();
-      curModel = gltf.scene; scene.add(curModel); frameObject(curModel);
+      curModel = gltf.scene; scene.add(curModel);
+      curModel.updateMatrixWorld(true);
+      // 源文件原点可能偏移：把包围盒水平居中、底部贴地，避免预览偏到角落
+      const bb = new THREE.Box3().setFromObject(curModel);
+      const bc = bb.getCenter(new THREE.Vector3());
+      curModel.position.x -= bc.x;
+      curModel.position.z -= bc.z;
+      curModel.position.y -= bb.min.y;
+      curModel.updateMatrixWorld(true);
+      modelOffset.copy(curModel.position);
+      if (rigGroup) rigGroup.position.copy(modelOffset);
+      frameObject(curModel);
       if (gltf.animations && gltf.animations.length) {
         mixer = new THREE.AnimationMixer(curModel);
         clipAction = mixer.clipAction(gltf.animations[0]); clipAction.play();
@@ -195,6 +296,7 @@ function loadPreview(url, { play = false } = {}) {
         setPlay(true);
       }
       document.getElementById('ovTitle').textContent = '模型：' + url.split('/').slice(-2).join('/');
+      applyViewMode();
       resolve(gltf);
     }, undefined, reject);
   });
@@ -206,6 +308,383 @@ function setPlay(p) {
 }
 document.getElementById('btnPlay').onclick = () => setPlay(!playing);
 
+// ---------------- 源动画小窗预览（右上角） ----------------
+function ensureMini() {
+  if (miniRenderer) return;
+  const wrapEl = document.getElementById('miniWrap');
+  miniRenderer = new THREE.WebGLRenderer({ antialias: true });
+  miniRenderer.setPixelRatio(window.devicePixelRatio);
+  miniRenderer.outputColorSpace = THREE.SRGBColorSpace;
+  wrapEl.appendChild(miniRenderer.domElement);
+  miniScene = new THREE.Scene();
+  miniScene.background = new THREE.Color(0x101216);
+  miniCam = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+  miniControls = new OrbitControls(miniCam, miniRenderer.domElement);
+  miniScene.add(new THREE.AmbientLight(0xffffff, 0.9));
+  const d2 = new THREE.DirectionalLight(0xffffff, 0.6); d2.position.set(2, 4, 3); miniScene.add(d2);
+  miniRenderer.setSize(248, 248);
+}
+function clearMini() {
+  if (miniHelper) { miniScene.remove(miniHelper); miniHelper = null; }
+  if (miniModel) { miniScene.remove(miniModel); miniModel.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+  miniModel = null; miniMixer = null; miniTaskId = null;
+}
+function loadMiniPreview(url, taskId) {
+  ensureMini();
+  loader.load(url, (gltf) => {
+    clearMini();
+    miniModel = gltf.scene; miniScene.add(miniModel);
+    miniModel.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(miniModel);
+    const c = bb.getCenter(new THREE.Vector3()), s = bb.getSize(new THREE.Vector3());
+    const maxDim = Math.max(s.x, s.y, s.z) || 1;
+    miniControls.target.copy(c);
+    miniCam.position.copy(c).add(new THREE.Vector3(maxDim * 1.2, maxDim * 0.8, maxDim * 1.6));
+    miniCam.near = maxDim / 100; miniCam.far = maxDim * 50; miniCam.updateProjectionMatrix();
+    if (gltf.animations && gltf.animations.length) {
+      miniMixer = new THREE.AnimationMixer(miniModel);
+      miniMixer.clipAction(gltf.animations[0]).play();
+    }
+    // 小窗也叠上源骨骼线，便于与主画布绑定骨骼对照
+    miniHelper = new THREE.SkeletonHelper(miniModel);
+    miniHelper.material.depthTest = false; miniHelper.renderOrder = 999;
+    miniScene.add(miniHelper);
+    miniTaskId = taskId;
+    document.getElementById('miniPanel').style.display = 'block';
+    log('源动画小窗预览已开启 🎬');
+  }, undefined, (e) => log('源动画预览失败：' + e.message));
+}
+document.getElementById('btnMiniClose').onclick = () => {
+  document.getElementById('miniPanel').style.display = 'none';
+};
+document.getElementById('btnMiniToggle').onclick = () => {
+  const p = document.getElementById('miniPanel');
+  if (p.style.display === 'none') {
+    if (!miniModel) { log('源动画尚未上传'); return; }
+    p.style.display = 'block';
+  } else p.style.display = 'none';
+};
+
+// ---------------- 骨骼叠加（模型 / 骨骼 / 合并） ----------------
+function clearRig() {
+  if (rigGroup) { scene.remove(rigGroup); rigGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+  rigGroup = null; rigTaskId = null; curRig = null;
+  syncViewBar();
+}
+function buildRig(rig) {
+  const g = new THREE.Group();
+  const joints = rig.joints || {};
+  const pos = {};
+  for (const [id, j] of Object.entries(joints)) pos[id] = new THREE.Vector3(...(j.head || [0, 0, 0]));
+  // 骨：父→子连线
+  const pts = [];
+  for (const [id, j] of Object.entries(joints)) {
+    if (j.parent && pos[j.parent]) pts.push(pos[j.parent].clone(), pos[id].clone());
+  }
+  if (pts.length) {
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const lm = new THREE.LineBasicMaterial({ color: 0x00e5ff, depthTest: false, depthWrite: false });
+    const ls = new THREE.LineSegments(geo, lm); ls.renderOrder = 999; g.add(ls);
+  }
+  // 关节：小球（depthTest 关闭，避免被网格遮挡只看得到露出部分）
+  const sg = new THREE.SphereGeometry(0.012, 12, 12);
+  const sm = new THREE.MeshBasicMaterial({ color: 0xffb300, depthTest: false, depthWrite: false });
+  for (const id of Object.keys(pos)) {
+    const m = new THREE.Mesh(sg, sm); m.position.copy(pos[id]); m.renderOrder = 999; g.add(m);
+  }
+  g.position.copy(modelOffset);
+  return g;
+}
+function syncViewBar() {
+  const has = !!rigGroup;
+  document.querySelectorAll('#viewBar button').forEach(b => {
+    const mode = b.dataset.mode;
+    b.disabled = !has && mode !== 'mesh';
+    b.classList.toggle('on', mode === viewMode);
+  });
+}
+function applyViewMode() {
+  if (curModel) {
+    // 骨骼模式：完全隐藏模型；合并模式：模型半透明幽灵化，便于看骨骼是否套在模型中间
+    curModel.visible = (viewMode !== 'bone');
+    setMeshGhost(viewMode === 'both' && !!rigGroup);
+  }
+  if (rigGroup) rigGroup.visible = (viewMode !== 'mesh');
+  syncViewBar();
+}
+function setMeshGhost(ghost) {
+  ghostObject(curModel, ghost);
+}
+function ghostObject(obj, ghost) {
+  if (!obj) return;
+  obj.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (ghost) {
+        if (m.userData._ghosted) continue;
+        m.userData._ot = m.opacity; m.userData._otr = m.transparent; m.userData._odw = m.depthWrite;
+        m.transparent = true; m.opacity = 0.25; m.depthWrite = false; m.userData._ghosted = true;
+      } else if (m.userData._ghosted) {
+        m.opacity = m.userData._ot; m.transparent = m.userData._otr; m.depthWrite = m.userData._odw;
+        m.userData._ghosted = false;
+      }
+    }
+  });
+}
+document.querySelectorAll('#viewBar button').forEach(b => {
+  b.onclick = () => { viewMode = b.dataset.mode; applyViewMode(); };
+});
+document.getElementById('btnCmp').onclick = () => toggleCompare();
+document.getElementById('btnReviewView').onclick = () => { rvOn ? exitReview() : enterReview(); };
+
+// 源骨骼并排对比：源模型+SkeletonHelper 归一化同身高后摆到主画布右侧同屏播放
+function clearCompare() {
+  if (cmpHelper) { scene.remove(cmpHelper); cmpHelper = null; }
+  if (cmpGroup) { scene.remove(cmpGroup); cmpGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+  cmpGroup = null; cmpMixer = null;
+}
+async function toggleCompare() {
+  const btn = document.getElementById('btnCmp');
+  if (cmpOn) {
+    cmpOn = false; clearCompare(); btn.classList.remove('on');
+    return;
+  }
+  if (!currentTaskId) return;
+  try {
+    const gltf = await new Promise((res, rej) =>
+      loader.load(`/v1/jobs/${currentTaskId}/source.glb`, res, undefined, rej));
+    clearCompare();
+    cmpGroup = gltf.scene; scene.add(cmpGroup);
+    cmpGroup.updateMatrixWorld(true);
+    // 同身高归一化 + 摆到右侧 + 脚底贴地，与目标骨骼同坐标系可比
+    const tgtH = curModel ? new THREE.Box3().setFromObject(curModel).getSize(new THREE.Vector3()).y : 1;
+    const bb = new THREE.Box3().setFromObject(cmpGroup);
+    const s = bb.getSize(new THREE.Vector3());
+    cmpGroup.scale.setScalar(tgtH / (s.y || 1));
+    cmpGroup.updateMatrixWorld(true);
+    const bb2 = new THREE.Box3().setFromObject(cmpGroup);
+    const c2 = bb2.getCenter(new THREE.Vector3());
+    cmpGroup.position.x += tgtH * 1.1 - c2.x;
+    cmpGroup.position.z -= c2.z;
+    cmpGroup.position.y -= bb2.min.y;
+    cmpGroup.updateMatrixWorld(true);
+    cmpHelper = new THREE.SkeletonHelper(cmpGroup);
+    cmpHelper.material.depthTest = false; cmpHelper.renderOrder = 998;
+    scene.add(cmpHelper);
+    if (gltf.animations && gltf.animations.length) {
+      cmpMixer = new THREE.AnimationMixer(cmpGroup);
+      cmpMixer.clipAction(gltf.animations[0]).play();
+    }
+    cmpOn = true; btn.classList.add('on');
+    log('源骨骼并排对比已开启（右侧）🦴⇄🦴');
+  } catch (e) { log('对比加载失败：' + e.message); }
+}
+// 语义关节父子表（与后端 skeleton.py PARENTS 一致），用于把源骨骼重画成语义拓扑
+const SEM_PARENTS = {
+  pelvis: null, spine_01: 'pelvis', spine_02: 'spine_01', chest: 'spine_02',
+  neck: 'chest', head: 'neck',
+  clavicle_l: 'chest', upper_arm_l: 'clavicle_l', lower_arm_l: 'upper_arm_l', hand_l: 'lower_arm_l',
+  clavicle_r: 'chest', upper_arm_r: 'clavicle_r', lower_arm_r: 'upper_arm_r', hand_r: 'lower_arm_r',
+  upper_leg_l: 'pelvis', lower_leg_l: 'upper_leg_l', foot_l: 'lower_leg_l', toe_l: 'foot_l',
+  upper_leg_r: 'pelvis', lower_leg_r: 'upper_leg_r', foot_r: 'lower_leg_r', toe_r: 'foot_r',
+};
+function boneWorldPos(b) { const w = new THREE.Vector3(); b.getWorldPosition(w); return w; }
+function semanticBones(root, mapping) {
+  const bones = [];
+  root.traverse(o => { if (o.isBone) bones.push(o); });
+  const byName = {}; bones.forEach(b => { byName[b.name] = b; });
+  const boneOf = {};
+  (mapping.items || []).forEach(it => {
+    const b = it.source_name != null ? byName[it.source_name] : bones[it.source_node];
+    if (b) boneOf[it.semantic] = b;
+  });
+  return boneOf;
+}
+function poseToTargetPose(root, boneOf, rigHeads) {
+  // 把源骨架逐骨旋转到目标 rest pose 方向（蒙皮网格随之变 T/A 姿势），便于与绑定骨骼直接对比
+  const v = a => new THREE.Vector3(a[0], a[1], a[2]);
+  const order = Object.keys(SEM_PARENTS);
+  const childOf = {};
+  for (const c of order) { const p = SEM_PARENTS[c]; if (p && !childOf[p]) childOf[p] = c; }
+  root.updateMatrixWorld(true);
+  // 全局预对齐：脊柱轴
+  if (boneOf.pelvis && boneOf.chest && rigHeads.pelvis && rigHeads.chest) {
+    const src = boneWorldPos(boneOf.chest).sub(boneWorldPos(boneOf.pelvis)).normalize();
+    const tgt = v(rigHeads.chest).sub(v(rigHeads.pelvis)).normalize();
+    if (src.lengthSq() > 0.5 && tgt.lengthSq() > 0.5) {
+      root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(src, tgt));
+      root.updateMatrixWorld(true);
+    }
+  }
+  // 父先子后：把每根骨的 world 方向旋到目标方向
+  for (const j of order) {
+    const c = childOf[j];
+    const b = boneOf[j], bc = c ? boneOf[c] : null;
+    if (!b || !bc || !rigHeads[j] || !rigHeads[c]) continue;
+    const d = v(rigHeads[c]).sub(v(rigHeads[j])).normalize();
+    const cur = boneWorldPos(bc).sub(boneWorldPos(b)).normalize();
+    if (cur.lengthSq() < 0.5 || d.lengthSq() < 0.5) continue;
+    const qw = new THREE.Quaternion().setFromUnitVectors(cur, d);
+    const pq = b.parent ? b.parent.getWorldQuaternion(new THREE.Quaternion()) : new THREE.Quaternion();
+    b.quaternion.premultiply(pq.clone().invert().multiply(qw).multiply(pq));
+    b.updateMatrixWorld(true);
+  }
+}
+function centerLocal(obj, boneOf, scaleTo) {
+  // 在父空间内：语义关节 x/z 居中、脚底贴地，可选按关节高度归一尺度
+  if (!Object.keys(boneOf).length) return;
+  obj.parent.updateMatrixWorld(true);
+  obj.updateMatrixWorld(true);
+  const meas = () => Object.values(boneOf).map(b => obj.parent.worldToLocal(boneWorldPos(b)));
+  if (scaleTo) {
+    const ys0 = meas().map(p => p.y);
+    const h = (Math.max(...ys0) - Math.min(...ys0)) || 1;
+    obj.scale.multiplyScalar(scaleTo / h);
+    obj.updateMatrixWorld(true);
+  }
+  const ps = meas();
+  const cx = ps.reduce((a, p) => a + p.x, 0) / ps.length;
+  const cz = ps.reduce((a, p) => a + p.z, 0) / ps.length;
+  const minY = Math.min(...ps.map(p => p.y));
+  obj.position.x -= cx; obj.position.z -= cz; obj.position.y -= minY;
+  obj.updateMatrixWorld(true);
+}
+function centerRigGroup(g, rigHeads) {
+  // rig 子节点即 head 局部坐标；直接把组原点移到关节中心/脚底
+  const ps = Object.values(rigHeads).map(a => new THREE.Vector3(...a));
+  if (!ps.length) return;
+  const cx = ps.reduce((a, p) => a + p.x, 0) / ps.length;
+  const cz = ps.reduce((a, p) => a + p.z, 0) / ps.length;
+  const minY = Math.min(...ps.map(p => p.y));
+  g.position.set(-cx, -minY, -cz);
+}
+function cloneGhosted(src) {
+  const c = src.clone(true);
+  c.traverse(o => {
+    if (o.isMesh && o.material) {
+      o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+    }
+  });
+  ghostObject(c, true);
+  return c;
+}
+async function enterReview() {
+  if (!currentTaskId) return;
+  try {
+    if (!rigGroup) await loadRigForTask(currentTaskId);
+    const mapping = await (await api(`/v1/jobs/${currentTaskId}/mapping`)).json();
+    const loadSrc = () => new Promise((res, rej) =>
+      loader.load(`/v1/jobs/${currentTaskId}/source.glb`, res, undefined, rej));
+    const [gA, gB] = await Promise.all([loadSrc(), loadSrc()]);
+    exitReview();
+    const rigHeads = {};
+    for (const [j, jd] of Object.entries((curRig && curRig.joints) || {})) rigHeads[j] = jd.head;
+    const tys = Object.values(rigHeads).map(a => a[1]);
+    const tgtH = (Math.max(...tys) - Math.min(...tys)) || 1;
+    // 四列布局（列组旋转使目标局部 forward=+X 面向相机）
+    const cols = [-1.5, -0.5, 0.5, 1.5].map(k => {
+      const g = new THREE.Group();
+      g.rotation.y = -Math.PI / 2;
+      g.position.x = k * tgtH * 0.95;
+      scene.add(g); rvParts.push(g);
+      return g;
+    });
+    // ① 源模型 + 其原生骨骼（保持原始姿势）；先在场景根下摆好再入列
+    const srcA = gA.scene; scene.add(srcA); rvParts.push(srcA);
+    const boneA = semanticBones(srcA, mapping);
+    centerLocal(srcA, boneA, tgtH);
+    ghostObject(srcA, true);
+    cols[0].add(srcA);
+    const helperA = new THREE.SkeletonHelper(srcA);
+    helperA.material.depthTest = false; helperA.renderOrder = 997;
+    srcA.add(helperA); rvParts.push(helperA);
+    // ② 源剥离纯骨骼（摆成目标 rest pose，无网格）
+    const srcB = gB.scene; scene.add(srcB); rvParts.push(srcB);
+    const boneB = semanticBones(srcB, mapping);
+    poseToTargetPose(srcB, boneB, rigHeads);
+    centerLocal(srcB, boneB, tgtH);
+    srcB.traverse(o => { if (o.isMesh) o.visible = false; });  // 只隐网格，保留骨骼节点
+    cols[1].add(srcB);
+    const helperB = new THREE.SkeletonHelper(srcB);
+    helperB.material.depthTest = false; helperB.renderOrder = 997;
+    srcB.add(helperB); rvParts.push(helperB);
+    // ③ 新绑定骨骼（无模型）
+    const rigC = buildRig(curRig); cols[2].add(rigC); rvParts.push(rigC);
+    centerRigGroup(rigC, rigHeads);
+    // ④ 新绑定骨骼 + 目标模型（幽灵）
+    const rigD = buildRig(curRig); cols[3].add(rigD); rvParts.push(rigD);
+    centerRigGroup(rigD, rigHeads);
+    if (curModel) {
+      const meshD = cloneGhosted(curModel); cols[3].add(meshD); rvParts.push(meshD);
+      meshD.position.copy(rigD.position);
+    }
+    scene.updateMatrixWorld(true);
+    // 对应骨骼点连线：①-②-③-④ 同一语义关节串起来
+    const pts = [];
+    for (const j of Object.keys(SEM_PARENTS)) {
+      const p1 = boneA[j] ? boneWorldPos(boneA[j]) : null;
+      const p2 = boneB[j] ? boneWorldPos(boneB[j]) : null;
+      const h = rigHeads[j];
+      const p3 = h ? rigC.localToWorld(new THREE.Vector3(...h)) : null;
+      const p4 = h ? rigD.localToWorld(new THREE.Vector3(...h)) : null;
+      const chain = [p1, p2, p3, p4].filter(Boolean);
+      for (let i = 0; i + 1 < chain.length; i++) pts.push(chain[i].clone(), chain[i + 1].clone());
+    }
+    if (pts.length) {
+      const lm = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35,
+        depthTest: false, depthWrite: false });
+      const ls = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lm);
+      ls.renderOrder = 996; scene.add(ls); rvParts.push(ls);
+    }
+    // 主画布原模型/骨骼隐藏，避免与四列重叠
+    if (curModel) curModel.visible = false;
+    if (rigGroup) rigGroup.visible = false;
+    // 相机框住四列
+    const box = new THREE.Box3();
+    pts.forEach(p => box.expandByPoint(p));
+    if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(0, tgtH / 2, 0),
+      new THREE.Vector3(tgtH * 4, tgtH, tgtH));
+    const c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+    controls.target.copy(c);
+    camera.position.copy(c).add(new THREE.Vector3(0, maxDim * 0.25, maxDim * 1.35));
+    controls.update();
+    rvOn = true;
+    document.getElementById('btnReviewView').classList.add('on');
+    log('审核四联视图：①源+骨骼 ②源纯骨骼 ③绑定骨骼 ④绑定骨骼+目标；白线=对应关节');
+  } catch (e) { log('审核视图加载失败：' + e.message); }
+}
+function exitReview() {
+  rvParts.forEach(o => {
+    if (o.parent) o.parent.remove(o);
+    if (o.traverse) o.traverse(n => {
+      if (n.geometry) n.geometry.dispose();
+      if (n.material) {
+        const ms = Array.isArray(n.material) ? n.material : [n.material];
+        ms.forEach(m => { if (m.userData && m.userData._ghosted) m.dispose(); });
+      }
+    });
+  });
+  rvParts = [];
+  rvOn = false;
+  document.getElementById('btnReviewView').classList.remove('on');
+  applyViewMode();  // 恢复主画布模型/骨骼可见性与幽灵状态
+}
+async function loadRigForTask(taskId) {
+  if (rigTaskId === taskId && rigGroup) return;
+  let rig = null;
+  try { rig = await (await api(`/v1/jobs/${taskId}/rig`)).json(); } catch (e) { rig = null; }
+  clearRig();
+  if (rig) {
+    rigGroup = buildRig(rig); scene.add(rigGroup); rigTaskId = taskId; curRig = rig;
+    if (viewMode === 'mesh') viewMode = 'both';  // 首次拿到骨骼默认合并查看
+    log('骨骼已加载 🦴 右上可切换 模型/骨骼/合并');
+  }
+  applyViewMode();
+}
+syncViewBar();
+
 // ---------------- 日志 / 状态 ----------------
 function log(msg) {
   const el = document.getElementById('log');
@@ -213,6 +692,9 @@ function log(msg) {
 }
 const STAGES = ['NORMALIZE','PRECHECK','RENDER_VIEWS','POSE_INFER','SOLVE_RIG','BUILD_RIG','MAP_SOURCE','RETARGET','EXPORT_VERIFY'];
 function renderTaskInfo(info) {
+  document.getElementById('detailTitle').textContent = info.name || info.task_id;
+  const ds = document.getElementById('detailState');
+  ds.textContent = info.state; ds.className = 'badge b-' + info.state;
   const si = document.getElementById('taskInfo');
   const stageMap = {}; (info.stages || []).forEach(s => stageMap[s.stage] = s);
   const rows = STAGES.map(st => {
@@ -239,6 +721,43 @@ function renderTaskInfo(info) {
   document.getElementById('ovStatus').innerHTML =
     `任务 <b>${info.task_id}</b> · <span class="badge b-${info.state}">${info.state}</span>` +
     (info.current_stage ? ` · ${info.current_stage}` : '');
+  refreshUploadState(info);
+  // 审核面板：NEEDS_REVIEW 时列出门控原因与处置按钮
+  const rc = document.getElementById('reviewCard');
+  if (info.state === 'NEEDS_REVIEW') {
+    rc.style.display = 'block';
+    document.getElementById('reviewReasons').innerHTML =
+      (info.review_reasons || []).map(r => `<div>· ${r}</div>`).join('') ||
+      '<div>· 置信度处于审核区间</div>';
+  } else rc.style.display = 'none';
+  // 骨骼映射/建骨完成后把骨骼画到预览面板
+  const kinds2 = (info.artifacts || []).map(a => a.kind);
+  if (kinds2.includes('rig')) loadRigForTask(info.task_id);
+  else if (rigTaskId !== null) { clearRig(); applyViewMode(); }
+}
+
+// 根据产物/阶段在"上传"与"绑定骨骼/开始迁移/重新上传"两种形态间切换
+function refreshUploadState(info) {
+  const kinds = (info.artifacts || []).map(a => a.kind);
+  const hasTarget = kinds.includes('target') || kinds.includes('target_raw');
+  const hasSource = kinds.includes('source') || kinds.includes('source_raw');
+  const rigDone = (info.stages || []).some(s => s.stage === 'BUILD_RIG' && s.status === 'DONE');
+  document.getElementById('tgtPick').style.display = hasTarget ? 'none' : 'block';
+  document.getElementById('tgtDone').style.display = hasTarget ? 'block' : 'none';
+  if (hasTarget) document.getElementById('tgtName').textContent = '已上传：' + (info.target_filename || '');
+  document.getElementById('srcPick').style.display = hasSource ? 'none' : 'block';
+  document.getElementById('srcDone').style.display = hasSource ? 'block' : 'none';
+  if (hasSource) document.getElementById('srcName').textContent = '已上传：' + (info.source_filename || '');
+  document.getElementById('btnDetect').disabled = !hasTarget;
+  document.getElementById('btnMigrate').disabled = !(hasSource && rigDone);
+  document.getElementById('btnCmp').disabled = !hasSource;
+  // 源动画就绪 → 右上角小窗自动预览
+  if (hasSource && miniTaskId !== info.task_id) {
+    loadMiniPreview(`/v1/jobs/${info.task_id}/source.glb`, info.task_id);
+  } else if (!hasSource && miniTaskId !== null) {
+    clearMini();
+    document.getElementById('miniPanel').style.display = 'none';
+  }
 }
 
 // ---------------- API ----------------
@@ -254,7 +773,7 @@ async function listTasks() {
     if (!j.tasks.length) { box.innerHTML = '<div class="muted">暂无</div>'; return; }
     box.innerHTML = j.tasks.map(t =>
       `<div class="taskitem" data-id="${t.task_id}">
-         <span>${t.task_id} <span class="muted">${(t.target_filename||'').slice(0,14)}</span></span>
+         <span>${t.name || t.task_id} <span class="muted">${t.task_id}</span></span>
          <span class="badge b-${t.state}">${t.state}</span>
        </div>`).join('');
     box.querySelectorAll('.taskitem').forEach(el =>
@@ -265,6 +784,16 @@ async function listTasks() {
 let currentTaskId = null, pollTimer = null, viewsDone = false, viewsBusy = false;
 
 function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// URL 与任务绑定：#task=<id>，刷新页面可自动定位回该任务
+function setUrlTask(taskId) {
+  const clean = location.pathname + location.search;
+  history.replaceState(null, '', taskId ? `${clean}#task=${taskId}` : clean);
+}
+function urlTaskId() {
+  const m = location.hash.match(/#task=([\w-]+)/);
+  return m ? m[1] : null;
+}
 
 async function pollOnce() {
   if (!currentTaskId) return;
@@ -293,17 +822,39 @@ async function pollOnce() {
   if (info.state === 'WAITING' && info.current_stage === 'RENDER_VIEWS' && !viewsDone && !viewsBusy) {
     renderAndUploadViews(info.task_id); return;
   }
-  if (info.state === 'WAITING') { stopPoll(); log('任务挂起（' + info.current_stage + '）：等待后续阶段实现或人工操作'); }
+  if (info.state === 'WAITING') {
+    stopPoll();
+    if (info.current_stage === 'BUILD_RIG') log('骨骼检测完成 🦴 可上传动画后点「开始迁移」');
+    else log('任务挂起（' + info.current_stage + '）：等待后续操作');
+  }
 }
 
 function startPoll() { stopPoll(); pollOnce(); pollTimer = setInterval(pollOnce, 1200); }
 
 async function openTask(taskId) {
   currentTaskId = taskId; viewsDone = false; viewsBusy = false;
-  document.getElementById('taskIdInput').value = taskId;
+  setUrlTask(taskId);
+  cmpOn = false; clearCompare();
+  document.getElementById('btnCmp').classList.remove('on');
+  exitReview();
+  document.getElementById('viewList').style.display = 'none';
+  document.getElementById('viewDetail').style.display = 'block';
   clearModel();
   log('打开任务 ' + taskId);
   startPoll();
+}
+function backToList() {
+  stopPoll(); currentTaskId = null;
+  setUrlTask(null);
+  cmpOn = false; clearCompare();
+  document.getElementById('btnCmp').classList.remove('on');
+  exitReview();
+  clearMini();
+  document.getElementById('miniPanel').style.display = 'none';
+  document.getElementById('viewDetail').style.display = 'none';
+  document.getElementById('viewList').style.display = 'block';
+  clearModel();
+  listTasks();
 }
 
 // ---------------- 多视角离屏渲染 + 回传 ----------------
@@ -357,37 +908,107 @@ async function captureViews(spec, modelScene) {
   return out;
 }
 
-// ---------------- 创建任务 ----------------
-document.getElementById('btnCreate').onclick = async () => {
-  const sf = document.getElementById('srcFile').files[0];
-  const tf = document.getElementById('tgtFile').files[0];
-  const msg = document.getElementById('createMsg');
-  if (!sf || !tf) { msg.textContent = '请同时选择源文件与目标文件'; return; }
-  const cfg = {
-    action: 'retarget',
-    fps: parseInt(document.getElementById('cfgFps').value || '0', 10),
-    enable_pose_ai: document.getElementById('cfgAI').checked,
-    foot_lock: document.getElementById('cfgFoot').checked,
-    auto_continue_on_review: false,
-  };
-  const fd = new FormData();
-  fd.append('source_file', sf); fd.append('target_file', tf);
-  fd.append('config', JSON.stringify(cfg));
-  msg.innerHTML = '<span class="spin"></span> 上传中…';
+// ---------------- 新建任务 / 上传 / 返回 ----------------
+document.getElementById('btnShowNew').onclick = () => {
+  document.getElementById('newTaskCard').style.display = 'block';
+  document.getElementById('newTaskName').focus();
+};
+document.getElementById('btnCancelNew').onclick = () => {
+  document.getElementById('newTaskCard').style.display = 'none';
+  document.getElementById('newMsg').textContent = '';
+};
+document.getElementById('btnCreateEmpty').onclick = async () => {
+  const name = document.getElementById('newTaskName').value.trim();
+  const msg = document.getElementById('newMsg');
+  if (!name) { msg.textContent = '请输入任务名称'; return; }
+  const fd = new FormData(); fd.append('name', name);
+  msg.innerHTML = '<span class="spin"></span> 创建中…';
   try {
     const j = await (await api('/v1/jobs', { method: 'POST', body: fd })).json();
-    msg.textContent = '已创建：' + j.task_id;
-    log('创建任务 ' + j.task_id);
-    listTasks();
+    msg.textContent = '';
+    document.getElementById('newTaskName').value = '';
+    document.getElementById('newTaskCard').style.display = 'none';
+    log('创建任务 ' + j.task_id + '（' + name + '）');
     openTask(j.task_id);
-  } catch (e) { msg.textContent = '创建失败：' + e.message; log('创建失败：' + e.message); }
+  } catch (e) { msg.textContent = '创建失败：' + e.message; }
 };
-
-document.getElementById('btnOpen').onclick = () => {
-  const id = document.getElementById('taskIdInput').value.trim();
-  if (id) openTask(id);
+document.getElementById('btnUploadTarget').onclick = async () => {
+  if (!currentTaskId) return;
+  const f = document.getElementById('tgtFile').files[0];
+  const msg = document.getElementById('tgtMsg');
+  if (!f) { msg.textContent = '请选择模型文件'; return; }
+  const fd = new FormData(); fd.append('file', f);
+  msg.innerHTML = '<span class="spin"></span> 上传中…';
+  try {
+    await api(`/v1/jobs/${currentTaskId}/upload/target`, { method: 'POST', body: fd });
+    msg.textContent = '已上传，预览就绪';
+    clearModel();
+    loadPreview(`/v1/jobs/${currentTaskId}/target.glb`).catch(e => log('预览失败：' + e.message));
+    log('模型已上传，可预览');
+    startPoll();
+  } catch (e) { msg.textContent = '上传失败：' + e.message; }
 };
-document.getElementById('btnRefreshList').onclick = listTasks;
+document.getElementById('btnUploadSource').onclick = async () => {
+  if (!currentTaskId) return;
+  const f = document.getElementById('srcFile').files[0];
+  const msg = document.getElementById('srcMsg');
+  if (!f) { msg.textContent = '请选择动画(源)文件'; return; }
+  const fd = new FormData(); fd.append('file', f);
+  msg.innerHTML = '<span class="spin"></span> 上传中…';
+  try {
+    const j = await (await api(`/v1/jobs/${currentTaskId}/upload/source`, { method: 'POST', body: fd })).json();
+    msg.textContent = j.pipeline_started ? '已上传，流水线已启动' : '已上传，待模型上传后启动';
+    log(j.pipeline_started ? '动画已上传，流水线启动 🚀' : '动画已上传');
+    startPoll();
+  } catch (e) { msg.textContent = '上传失败：' + e.message; }
+};
+document.getElementById('btnDetect').onclick = async () => {
+  if (!currentTaskId) return;
+  try {
+    await api(`/v1/jobs/${currentTaskId}/detect`, { method: 'POST' });
+    log('开始骨骼检测（YOLO+三维骨骼）…');
+    startPoll();
+  } catch (e) { log('骨骼检测启动失败：' + e.message); }
+};
+document.getElementById('btnMigrate').onclick = async () => {
+  if (!currentTaskId) return;
+  try {
+    await api(`/v1/jobs/${currentTaskId}/migrate`, { method: 'POST' });
+    log('开始动画迁移…');
+    startPoll();
+  } catch (e) { log('迁移启动失败：' + e.message); }
+};
+document.getElementById('btnForceExport').onclick = async () => {
+  if (!currentTaskId) return;
+  try {
+    await api(`/v1/jobs/${currentTaskId}/rerun`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from_stage: 'EXPORT_VERIFY', force: true }),
+    });
+    log('审核通过，强制导出…');
+    startPoll();
+  } catch (e) { log('强制导出失败：' + e.message); }
+};
+document.getElementById('btnResolve').onclick = async () => {
+  if (!currentTaskId) return;
+  try {
+    await api(`/v1/jobs/${currentTaskId}/rerun`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from_stage: 'SOLVE_RIG', force: false }),
+    });
+    log('重跑骨骼求解…');
+    startPoll();
+  } catch (e) { log('重跑失败：' + e.message); }
+};
+document.getElementById('btnRetargetReupload').onclick = () => {
+  document.getElementById('tgtPick').style.display = 'block';
+  document.getElementById('tgtDone').style.display = 'none';
+};
+document.getElementById('btnSourceReupload').onclick = () => {
+  document.getElementById('srcPick').style.display = 'block';
+  document.getElementById('srcDone').style.display = 'none';
+};
+document.getElementById('btnBackList').onclick = backToList;
 
 // 初始化
 (async function init() {
@@ -395,6 +1016,12 @@ document.getElementById('btnRefreshList').onclick = listTasks;
     const h = await (await api('/v1/health')).json();
     log(`后端就绪 v${h.version}｜assimp：${h.assimp || '未安装（仅 FBX 需要）'}`);
   } catch (e) { log('后端未就绪：' + e.message); }
+  // 刷新恢复：URL 带任务 ID 则直接进详情
+  const tid = urlTaskId();
+  if (tid) {
+    try { await api(`/v1/jobs/${tid}`); openTask(tid); return; }
+    catch (e) { log('URL 中的任务不存在：' + tid); setUrlTask(null); }
+  }
   listTasks();
 })();
 </script>

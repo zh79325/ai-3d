@@ -233,8 +233,10 @@ def solve_rig(detections: Dict[str, Dict[str, Dict]],
         if j not in heads:
             put(j, None, 0.0)
 
-    # 左右对称软约束（仅对 solved 的镜像对，绕矢状面 x=center_x）
-    heads, conf = _symmetrize(heads, conf, float(center[0]), cfg.symmetry_weight)
+    # 左右对称软约束（仅对 solved 的镜像对）；左右轴自动识别（镜像对差异最大的轴），
+    # 不能硬编码 X：有的模型左右在 Z（脚趾朝 +X）
+    axis = _lateral_axis(heads)
+    heads, conf = _symmetrize(heads, conf, float(center[axis]), cfg.symmetry_weight, axis)
     # 骨长稳定：按层级把骨长轻拉向比例先验
     heads = _stabilize_bones(heads, prior, cfg.bone_length_stability)
     # 人体比例软约束：把身高归一到包围盒高度（三角化已在世界尺度，通常无需再缩放，
@@ -247,11 +249,31 @@ def solve_rig(detections: Dict[str, Dict[str, Dict]],
                source=src)
 
 
+def _lateral_axis(heads: Dict[str, np.ndarray]) -> int:
+    """取镜像关节对坐标差异最大的轴作为左右轴（0=X,1=Y,2=Z）。"""
+    diffs = np.zeros(3)
+    n = 0
+    for j, m in MIRROR.items():
+        if m == j or j not in heads or m not in heads:
+            continue
+        diffs += np.abs(np.asarray(heads[j]) - np.asarray(heads[m]))
+        n += 1
+    if n == 0:
+        return 0
+    return int(np.argmax(diffs))
+
+
 def _symmetrize(heads: Dict[str, np.ndarray], conf: Dict[str, float],
-                center_x: float, weight: float) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
-    """对镜像关节对绕矢状面做置信度加权对称化。"""
+                center_lat: float, weight: float, axis: int) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
+    """对镜像关节对绕矢状面做置信度加权对称化（axis 为左右轴）。"""
     if weight <= 0:
         return heads, conf
+
+    def mirror(p: np.ndarray) -> np.ndarray:
+        q = np.asarray(p, np.float64).copy()
+        q[axis] = 2 * center_lat - q[axis]
+        return q
+
     seen: set = set()
     for j in JOINTS:
         m = MIRROR.get(j)
@@ -263,15 +285,11 @@ def _symmetrize(heads: Dict[str, np.ndarray], conf: Dict[str, float],
         ca, cb = conf.get(j, 0.0), conf.get(m, 0.0)
         if ca < 1e-6 and cb < 1e-6:
             continue
-        # b 关于 x=center_x 的镜像
-        b_mirror = np.array([2 * center_x - b[0], b[1], b[2]])
         tot = ca + cb
         wa, wb = ca / tot, cb / tot
-        blended = a * wa + b_mirror * wb
+        blended = a * wa + mirror(b) * wb
         heads[j] = a * (1 - weight) + blended * weight
-        # 对镜像同样处理（保持对称）
-        a_mirror = np.array([2 * center_x - a[0], a[1], a[2]])
-        blended_m = b * wb + a_mirror * wa
+        blended_m = b * wb + mirror(a) * wa
         heads[m] = b * (1 - weight) + blended_m * weight
         avg = (ca + cb) * 0.5
         conf[j] = conf.get(j, 0.0) * (1 - weight) + avg * weight

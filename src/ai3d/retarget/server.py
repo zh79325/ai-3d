@@ -33,6 +33,7 @@ from .schemas import (
     JobConfig,
     JobInfo,
     JobListResponse,
+    JobState,
     MappingPatch,
     RerunRequest,
     RigPatch,
@@ -91,8 +92,9 @@ async def get_config() -> JSONResponse:
 # --------------------------------------------------------------------------- #
 @router.post("/jobs", response_model=CreateJobResponse)
 async def create_job(
-    source_file: UploadFile = File(..., description="源：已绑定骨骼动画的 FBX/GLB"),
-    target_file: UploadFile = File(..., description="目标：无骨骼网格 FBX/GLB"),
+    source_file: Optional[UploadFile] = File(None, description="源：已绑定骨骼动画的 FBX/GLB"),
+    target_file: Optional[UploadFile] = File(None, description="目标：无骨骼网格 FBX/GLB"),
+    name: str = Form("", description="任务名称（可选）"),
     config: str = Form("{}", description="JobConfig JSON"),
 ) -> CreateJobResponse:
     try:
@@ -101,7 +103,20 @@ async def create_job(
         raise HTTPException(status_code=400, detail=f"config 非法 JSON：{exc}") from exc
 
     s = _store()
-    task_id = s.create_task(source_file.filename or "source", target_file.filename or "target", cfg)
+    # 仅名称：先建空任务，进入详情后再分别上传模型/动画
+    if source_file is None and target_file is None:
+        task_id = s.create_task("", "", cfg, name=name.strip() or "未命名任务",
+                                state=JobState.CREATED)
+        return CreateJobResponse(
+            task_id=task_id, state=JobState.CREATED, current_stage=None,
+            message="任务已创建，请进入后上传模型与动画",
+        )
+    if source_file is None or target_file is None:
+        raise HTTPException(status_code=400,
+                            detail="源文件与目标文件需同时提供，或都不提供（仅建空任务）")
+
+    task_id = s.create_task(source_file.filename or "source", target_file.filename or "target",
+                            cfg, name=name.strip() or (source_file.filename or "source"))
     try:
         up = s.upload_dir(task_id)
         up.mkdir(parents=True, exist_ok=True)
@@ -120,6 +135,78 @@ async def create_job(
         task_id=task_id, state="QUEUED", current_stage=Stage.NORMALIZE,
         message="任务已创建并开始归一化",
     )
+
+
+def _has_artifact(task_id: str, kind: ArtifactKind) -> bool:
+    p = _store().get_artifact_path(task_id, kind)
+    return bool(p) and Path(p).exists()
+
+
+@router.post("/jobs/{task_id}/upload/target")
+async def upload_target(task_id: str, file: UploadFile = File(...)) -> JSONResponse:
+    """上传目标模型（无骨骼网格）。上传即归一化，便于立即预览；不自动跑流水线。"""
+    _require_task(task_id)
+    s = _store()
+    up = s.upload_dir(task_id)
+    up.mkdir(parents=True, exist_ok=True)
+    tgt_raw = up / f"target{_safe_suffix(file.filename, '.glb')}"
+    tgt_raw.write_bytes(await file.read())
+    s.register_artifact(task_id, ArtifactKind.TARGET_RAW, tgt_raw)
+    s.update_task(task_id, target_filename=file.filename or "target")
+    try:
+        tgt_glb = s.path_for(task_id, ArtifactKind.TARGET)
+        glb_io.normalize_to_glb(tgt_raw, tgt_glb)
+        s.register_artifact(task_id, ArtifactKind.TARGET, tgt_glb)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"目标归一化失败：{exc}") from exc
+    return JSONResponse({"status": "ok", "task_id": task_id,
+                         "preview_ready": True, "pipeline_started": False})
+
+
+@router.post("/jobs/{task_id}/upload/source")
+async def upload_source(task_id: str, file: UploadFile = File(...)) -> JSONResponse:
+    """上传源（已绑定骨骼动画）。上传即归一化；不自动跑流水线，由前端按钮触发。"""
+    _require_task(task_id)
+    s = _store()
+    up = s.upload_dir(task_id)
+    up.mkdir(parents=True, exist_ok=True)
+    src_raw = up / f"source{_safe_suffix(file.filename, '.glb')}"
+    src_raw.write_bytes(await file.read())
+    s.register_artifact(task_id, ArtifactKind.SOURCE_RAW, src_raw)
+    s.update_task(task_id, source_filename=file.filename or "source")
+    try:
+        src_glb = s.path_for(task_id, ArtifactKind.SOURCE)
+        glb_io.normalize_to_glb(src_raw, src_glb)
+        s.register_artifact(task_id, ArtifactKind.SOURCE, src_glb)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"源归一化失败：{exc}") from exc
+    return JSONResponse({"status": "ok", "task_id": task_id, "pipeline_started": False})
+
+
+@router.post("/jobs/{task_id}/detect")
+async def detect(task_id: str) -> JSONResponse:
+    """目标侧骨骼检测：NORMALIZE→…→BUILD_RIG（YOLO/姿态 + 三维骨骼），不需源。"""
+    _require_task(task_id)
+    if not _has_artifact(task_id, ArtifactKind.TARGET_RAW):
+        raise HTTPException(status_code=400, detail="请先上传模型")
+    s = _store()
+    s.set_state(task_id, JobState.QUEUED, current_stage=Stage.NORMALIZE)
+    get_worker().start_async(task_id, from_stage=Stage.NORMALIZE, to_stage=Stage.BUILD_RIG)
+    return JSONResponse({"status": "ok", "task_id": task_id, "to_stage": "BUILD_RIG"})
+
+
+@router.post("/jobs/{task_id}/migrate")
+async def migrate(task_id: str) -> JSONResponse:
+    """动画迁移：MAP_SOURCE→…→EXPORT_VERIFY，需源+已建骨骼。"""
+    _require_task(task_id)
+    if not _has_artifact(task_id, ArtifactKind.SOURCE_RAW):
+        raise HTTPException(status_code=400, detail="请先上传动画（源）")
+    s = _store()
+    if s.load_json_artifact(task_id, "rig.json") is None:
+        raise HTTPException(status_code=400, detail="请先完成骨骼检测（绑定骨骼）")
+    s.set_state(task_id, JobState.QUEUED, current_stage=Stage.MAP_SOURCE)
+    get_worker().start_async(task_id, from_stage=Stage.MAP_SOURCE)
+    return JSONResponse({"status": "ok", "task_id": task_id, "from_stage": "MAP_SOURCE"})
 
 
 @router.get("/jobs", response_model=JobListResponse)
@@ -220,8 +307,9 @@ async def upload_views(
         saved.append(name)
     s.register_artifact(task_id, ArtifactKind.VIEWS, vdir)
     s.set_stage(task_id, Stage.RENDER_VIEWS, StageStatus.DONE, f"已接收 {len(saved)} 张视角图")
-    # 视角图就绪，继续下游 POSE_INFER→SOLVE_RIG→BUILD_RIG→…→DONE
-    get_worker().start_async(task_id, from_stage=Stage.POSE_INFER)
+    # 视角图就绪，继续下游；若尚无源文件则只跑到 BUILD_RIG（目标侧骨骼检测）
+    to_stage = None if _has_artifact(task_id, ArtifactKind.SOURCE_RAW) else Stage.BUILD_RIG
+    get_worker().start_async(task_id, from_stage=Stage.POSE_INFER, to_stage=to_stage)
     return JSONResponse({"status": "ok", "task_id": task_id, "views": saved})
 
 

@@ -40,6 +40,7 @@ STAGE_ORDER: List[Stage] = [
 
 class JobState(str, Enum):
     """任务生命周期状态。"""
+    CREATED = "CREATED"        # 已建任务但尚未上传齐文件/未启动
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     WAITING = "WAITING"          # 等待外部输入（如前端回传视角图）
@@ -156,6 +157,7 @@ class JobInfo(BaseModel):
     task_id: str
     state: JobState
     current_stage: Optional[Stage] = None
+    name: Optional[str] = None
     source_filename: Optional[str] = None
     target_filename: Optional[str] = None
     config: JobConfig = Field(default_factory=JobConfig)
@@ -174,6 +176,7 @@ class JobSummary(BaseModel):
     task_id: str
     state: JobState
     current_stage: Optional[Stage] = None
+    name: Optional[str] = None
     source_filename: Optional[str] = None
     target_filename: Optional[str] = None
     overall_confidence: Optional[float] = None

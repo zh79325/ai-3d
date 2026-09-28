@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_id            TEXT PRIMARY KEY,
     state              TEXT NOT NULL,
     current_stage      TEXT,
+    name               TEXT,                 -- 用户自定义任务名
     source_filename    TEXT,
     target_filename    TEXT,
     config             TEXT,                 -- JSON
@@ -98,6 +99,13 @@ class Database:
     def init(self) -> None:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """旧库轻量迁移：补建后加列（SQLite 不支持 IF NOT EXISTS 于 ADD COLUMN）。"""
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "name" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN name TEXT")
 
     # ---- 通用执行 ----
     def execute(self, sql: str, params: Sequence[Any] = ()) -> int:

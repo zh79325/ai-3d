@@ -96,7 +96,9 @@ class TaskStore:
     # 创建 / 查询
     # ------------------------------------------------------------------ #
     def create_task(self, source_filename: str, target_filename: str,
-                    config: Optional[JobConfig] = None) -> str:
+                    config: Optional[JobConfig] = None, *,
+                    name: Optional[str] = None,
+                    state: JobState = JobState.QUEUED) -> str:
         task_id = uuid.uuid4().hex[:12]
         cfg = config or JobConfig()
         self.upload_dir(task_id).mkdir(parents=True, exist_ok=True)
@@ -104,8 +106,9 @@ class TaskStore:
         ts = now_iso()
         self.db.insert("tasks", {
             "task_id": task_id,
-            "state": JobState.QUEUED.value,
+            "state": state.value,
             "current_stage": None,
+            "name": name,
             "source_filename": source_filename,
             "target_filename": target_filename,
             "config": cfg.model_dump_json(),
@@ -125,7 +128,8 @@ class TaskStore:
                 "status": StageStatus.PENDING.value, "message": None,
                 "started_at": None, "finished_at": None, "seq": _STAGE_SEQ[stage],
             })
-        logger.info("已创建任务 %s（源=%s 目标=%s）", task_id, source_filename, target_filename)
+        logger.info("已创建任务 %s（name=%s 源=%s 目标=%s）",
+                    task_id, name, source_filename, target_filename)
         return task_id
 
     def get_row(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -147,6 +151,7 @@ class TaskStore:
             current_stage=Stage(row["current_stage"]) if row["current_stage"] else None,
             source_filename=row["source_filename"],
             target_filename=row["target_filename"],
+            name=row.get("name"),
             config=_job_config_from_json(row["config"]),
             rig_revision=row["rig_revision"],
             mapping_revision=row["mapping_revision"],
@@ -168,6 +173,7 @@ class TaskStore:
                 task_id=r["task_id"], state=JobState(r["state"]),
                 current_stage=Stage(r["current_stage"]) if r["current_stage"] else None,
                 source_filename=r["source_filename"], target_filename=r["target_filename"],
+                name=r["name"],
                 overall_confidence=r["overall_confidence"],
                 created_at=r["created_at"], updated_at=r["updated_at"],
             ) for r in rows

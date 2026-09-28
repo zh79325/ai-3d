@@ -73,14 +73,15 @@ class Worker:
     # 调度
     # ------------------------------------------------------------------ #
     def run_pipeline(self, task_id: str, from_stage: Optional[Stage] = None,
-                     force: bool = False) -> None:
+                     force: bool = False, to_stage: Optional[Stage] = None) -> None:
         if not self.store.exists(task_id):
             logger.warning("run_pipeline：任务不存在 %s", task_id)
             return
         start = from_stage or self._resume_stage(task_id)
         start_idx = STAGE_ORDER.index(Stage(start))
+        end_idx = STAGE_ORDER.index(Stage(to_stage)) if to_stage else len(STAGE_ORDER) - 1
         self.store.update_task(task_id, state=JobState.RUNNING, error=None)
-        for stage in STAGE_ORDER[start_idx:]:
+        for stage in STAGE_ORDER[start_idx:end_idx + 1]:
             self.store.update_task(task_id, current_stage=stage)
             if self._should_skip(task_id, stage):
                 self.store.set_stage(task_id, stage, StageStatus.SKIPPED,
@@ -116,13 +117,17 @@ class Worker:
                                  f"阶段 {stage.value} 主动挂起，等待外部输入")
             self.store.update_task(task_id, state=JobState.WAITING)
             return
+        # 部分运行（如仅目标侧骨骼检测）到此为止，挂起等待后续操作
+        if to_stage is not None:
+            self.store.update_task(task_id, state=JobState.WAITING, current_stage=Stage(to_stage))
+            return
         # 全部阶段完成
         self.store.update_task(task_id, state=JobState.DONE, current_stage=Stage.EXPORT_VERIFY)
 
     def start_async(self, task_id: str, from_stage: Optional[Stage] = None,
-                    force: bool = False) -> threading.Thread:
+                    force: bool = False, to_stage: Optional[Stage] = None) -> threading.Thread:
         t = threading.Thread(target=self.run_pipeline,
-                             args=(task_id, from_stage, force), daemon=True)
+                             args=(task_id, from_stage, force, to_stage), daemon=True)
         t.start()
         return t
 
@@ -140,34 +145,43 @@ class Worker:
     # 阶段实现
     # ------------------------------------------------------------------ #
     def _normalize(self, task_id: str) -> StepResult:
-        """把上传的原始文件归一化为 source.glb / target.glb。"""
+        """把上传的原始文件归一化为 source.glb / target.glb（允许仅有其一）。"""
         s = self.store
         raw_source = s.get_artifact_path(task_id, ArtifactKind.SOURCE_RAW)
         raw_target = s.get_artifact_path(task_id, ArtifactKind.TARGET_RAW)
-        if not raw_source or not raw_target:
+        if not raw_source and not raw_target:
             raise RuntimeError("缺少原始上传文件（source_raw/target_raw）")
-        src_glb = s.path_for(task_id, ArtifactKind.SOURCE)
-        tgt_glb = s.path_for(task_id, ArtifactKind.TARGET)
-        glb_io.normalize_to_glb(raw_source, src_glb)
-        glb_io.normalize_to_glb(raw_target, tgt_glb)
-        s.register_artifact(task_id, ArtifactKind.SOURCE, src_glb)
-        s.register_artifact(task_id, ArtifactKind.TARGET, tgt_glb)
+        if raw_source:
+            src_glb = s.path_for(task_id, ArtifactKind.SOURCE)
+            glb_io.normalize_to_glb(raw_source, src_glb)
+            s.register_artifact(task_id, ArtifactKind.SOURCE, src_glb)
+        if raw_target:
+            tgt_glb = s.path_for(task_id, ArtifactKind.TARGET)
+            glb_io.normalize_to_glb(raw_target, tgt_glb)
+            s.register_artifact(task_id, ArtifactKind.TARGET, tgt_glb)
         return StepResult.CONTINUE
 
     def _precheck(self, task_id: str) -> StepResult:
-        """结构校验：目标须含网格；源须含骨架+动画（缺失仅告警，不阻断 P0）。"""
+        """结构校验：目标须含网格；源可缺（仅目标侧检测时告警不阻断）。"""
         s = self.store
-        src_glb = Path(s.get_artifact_path(task_id, ArtifactKind.SOURCE))
+        src_path = s.get_artifact_path(task_id, ArtifactKind.SOURCE)
         tgt_glb = Path(s.get_artifact_path(task_id, ArtifactKind.TARGET))
-        src_sum = glb_io.read_summary(src_glb)
+        if not tgt_glb or not Path(tgt_glb).exists():
+            raise RuntimeError("目标模型未归一化（target.glb 缺失），无法检测")
+        warnings = []
+        if src_path and Path(src_path).exists():
+            src_sum = glb_io.read_summary(Path(src_path))
+            if not src_sum["has_skeleton"]:
+                warnings.append("源文件未检测到骨架(skin)")
+            if not src_sum["has_animation"]:
+                warnings.append("源文件未检测到动画(animation)")
+        else:
+            src_sum = {"meshes": 0, "skins": 0, "animations": 0, "nodes": 0,
+                       "has_skeleton": False, "has_animation": False}
+            warnings.append("源文件未上传（仅做目标侧骨骼检测）")
         tgt_sum = glb_io.read_summary(tgt_glb)
         if tgt_sum["meshes"] < 1:
             raise RuntimeError("目标模型不含任何网格（mesh），无法迁移")
-        warnings = []
-        if not src_sum["has_skeleton"]:
-            warnings.append("源文件未检测到骨架(skin)")
-        if not src_sum["has_animation"]:
-            warnings.append("源文件未检测到动画(animation)")
         precheck = {"source": src_sum, "target": tgt_sum, "warnings": warnings}
         (s.task_dir(task_id) / "precheck.json").write_text(
             json.dumps(precheck, ensure_ascii=False, indent=2), encoding="utf-8")
