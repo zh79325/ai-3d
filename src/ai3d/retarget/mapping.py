@@ -46,8 +46,7 @@ _SIDE_TOKENS: Dict[str, Tuple[str, ...]] = {"l": ("left", "l"), "r": ("right", "
 # 注意：别名必须全局唯一（一个别名只归一个语义），且遵循 Mixamo 惯例
 # Hips/Spine/Spine1/Spine2 → pelvis/spine_01/spine_02/chest。
 _MIDLINE_ALIASES: Dict[str, set] = {
-    "pelvis": {"hips", "hip", "pelvis", "root", "center", "cog", "sacrum",
-               "body", "base", "hipcenter"},
+    "pelvis": {"hips", "hip", "pelvis", "sacrum", "hipcenter"},
     "spine_01": {"spine", "spine01", "spine0", "spinea", "abdomen", "waist",
                  "belly", "torso"},
     "spine_02": {"spine1", "spine02", "spineb", "middlespine"},
@@ -56,6 +55,11 @@ _MIDLINE_ALIASES: Dict[str, set] = {
     "neck": {"neck", "neck01", "neck1", "necka", "cervical"},
     "head": {"head", "head1", "skull", "cranium", "headtop"},
 }
+
+# pelvis 兜底别名：root/center/cog 等通常是地面原点节点而非骨盆。
+# 仅当骨架里不存在真正骨盆骨（hips/pelvis/…）时才把它们当作 pelvis，
+# 避免 UE 等同时含 root+pelvis 的骨架把语义骨盆映到地面原点。
+_PELVIS_FALLBACK = {"root", "center", "cog", "body", "base", "origin"}
 
 
 def _build_aliases() -> Dict[str, set]:
@@ -227,6 +231,16 @@ def build_mapping(source_joints: List[Dict], overrides: Optional[Dict[str, str]]
             if method != want:
                 continue
             assign(sem, node, method, score)
+
+    # 3.5) pelvis 兜底：无真正骨盆骨时才用 root/center/cog 等地面原点命名
+    if sem_to_node.get("pelvis") is None:
+        for j in source_joints:
+            node = j.get("node")
+            if node in used:
+                continue
+            if normalize_name(j.get("name")) in _PELVIS_FALLBACK:
+                assign("pelvis", node, "fallback", 0.8)
+                break
 
     # 4) 层级 + 几何补全
     _match_features(sem_to_node, source_joints, used)

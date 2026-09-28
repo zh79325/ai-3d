@@ -48,6 +48,11 @@
   .taskitem { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-radius:6px;
               font-size:12px; cursor:pointer; }
   .taskitem:hover { background:#12151a; }
+  .tiRight { display:flex; align-items:center; gap:6px; flex:0 0 auto; }
+  .tdel { padding:2px 6px; font-size:12px; line-height:1; color:var(--mut); background:transparent;
+          border:1px solid var(--line); border-radius:5px; cursor:pointer; }
+  .tdel:hover { color:var(--err); border-color:var(--err); }
+  button.danger { color:var(--err); border-color:var(--err); }
   .muted { color:var(--mut); font-size:11px; }
   .log { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--mut); white-space:pre-wrap;
          max-height:120px; overflow:auto; }
@@ -109,7 +114,10 @@
     <div id="viewDetail" style="display:none">
       <div class="row" style="justify-content:space-between;align-items:center;margin:14px 0 8px">
         <button id="btnBackList" class="ghost">← 返回列表</button>
-        <span class="badge" id="detailState">-</span>
+        <span class="row" style="align-items:center;gap:8px">
+          <span class="badge" id="detailState">-</span>
+          <button id="btnDeleteTask" class="ghost danger">🗑 删除</button>
+        </span>
       </div>
       <h2 id="detailTitle" style="margin:0 0 8px">任务</h2>
 
@@ -148,7 +156,7 @@
       <div class="card" id="reviewCard" style="display:none">
         <label>⚠️ 人工审核（EXPORT_VERIFY 门控）</label>
         <div id="reviewReasons" class="muted" style="font-size:12px"></div>
-        <div class="muted" style="font-size:12px;margin-top:4px">目视审核：主画布切「合并/骨骼」看骨骼是否套在模型内</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">目视审核：主画布切「合并/骨骼」看骨骼是否套在模型内；下方「🎬 预览结果动画」可播放迁移结果</div>
         <div class="row" style="margin-top:6px">
           <button id="btnForceExport">✅ 通过并导出</button>
           <button id="btnResolve" class="ghost">🔁 重跑求解</button>
@@ -161,6 +169,9 @@
       <div class="card">
         <div id="taskInfo"></div>
         <div id="downloads"></div>
+        <div class="row" style="margin-top:6px">
+          <button id="btnPreviewResult" class="ghost" style="display:none">🎬 预览结果动画</button>
+        </div>
       </div>
 
       <h2 style="margin:14px 0 8px">日志</h2>
@@ -417,8 +428,9 @@ function applyViewMode() {
 function setMeshGhost(ghost) {
   ghostObject(curModel, ghost);
 }
-function ghostObject(obj, ghost) {
+function ghostObject(obj, ghost, opacity) {
   if (!obj) return;
+  const op = opacity != null ? opacity : 0.25;
   obj.traverse(o => {
     if (!o.isMesh || !o.material) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -426,10 +438,15 @@ function ghostObject(obj, ghost) {
       if (ghost) {
         if (m.userData._ghosted) continue;
         m.userData._ot = m.opacity; m.userData._otr = m.transparent; m.userData._odw = m.depthWrite;
-        m.transparent = true; m.opacity = 0.25; m.depthWrite = false; m.userData._ghosted = true;
+        m.transparent = true; m.opacity = op; m.depthWrite = false; m.userData._ghosted = true;
+        m.needsUpdate = true;
+        // SkinnedMesh 包围球不含蒙皮形变，列偏移后易被误剔除 → 幽灵不剔除
+        if (o.userData._ofc === undefined) o.userData._ofc = o.frustumCulled;
+        o.frustumCulled = false;
       } else if (m.userData._ghosted) {
         m.opacity = m.userData._ot; m.transparent = m.userData._otr; m.depthWrite = m.userData._odw;
         m.userData._ghosted = false;
+        if (o.userData._ofc !== undefined) { o.frustumCulled = o.userData._ofc; delete o.userData._ofc; }
       }
     }
   });
@@ -519,6 +536,21 @@ function updateBoneLines(ls) {
   attr.needsUpdate = true;
   ls.geometry.computeBoundingSphere();
 }
+// 语义关节点小球：在骨骼（①②列）上画出与③列绑定骨骼同色的对应点，白线端点可见
+function buildJointDots(boneOf, color, size) {
+  const g = new THREE.Group();
+  const sg = new THREE.SphereGeometry(size || 0.015, 12, 12);
+  const sm = new THREE.MeshBasicMaterial({ color: color || 0xffb300, depthTest: false, depthWrite: false });
+  sm.userData._rv = true;  // 审核视图专用，退出时释放
+  for (const b of Object.values(boneOf)) {
+    const m = new THREE.Mesh(sg, sm);
+    m.position.copy(boneWorldPos(b));
+    m.renderOrder = 999;
+    g.add(m);
+  }
+  g.userData._rvGeo = sg;
+  return g;
+}
 function semanticBones(root, mapping) {
   const bones = [];
   root.traverse(o => { if (o.isBone) bones.push(o); });
@@ -529,36 +561,6 @@ function semanticBones(root, mapping) {
     if (b) boneOf[it.semantic] = b;
   });
   return boneOf;
-}
-function poseToTargetPose(root, boneOf, rigHeads) {
-  // 把源骨架逐骨旋转到目标 rest pose 方向（蒙皮网格随之变 T/A 姿势），便于与绑定骨骼直接对比
-  const v = a => new THREE.Vector3(a[0], a[1], a[2]);
-  const order = Object.keys(SEM_PARENTS);
-  const childOf = {};
-  for (const c of order) { const p = SEM_PARENTS[c]; if (p && !childOf[p]) childOf[p] = c; }
-  root.updateMatrixWorld(true);
-  // 全局预对齐：脊柱轴
-  if (boneOf.pelvis && boneOf.chest && rigHeads.pelvis && rigHeads.chest) {
-    const src = boneWorldPos(boneOf.chest).sub(boneWorldPos(boneOf.pelvis)).normalize();
-    const tgt = v(rigHeads.chest).sub(v(rigHeads.pelvis)).normalize();
-    if (src.lengthSq() > 0.5 && tgt.lengthSq() > 0.5) {
-      root.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(src, tgt));
-      root.updateMatrixWorld(true);
-    }
-  }
-  // 父先子后：把每根骨的 world 方向旋到目标方向
-  for (const j of order) {
-    const c = childOf[j];
-    const b = boneOf[j], bc = c ? boneOf[c] : null;
-    if (!b || !bc || !rigHeads[j] || !rigHeads[c]) continue;
-    const d = v(rigHeads[c]).sub(v(rigHeads[j])).normalize();
-    const cur = boneWorldPos(bc).sub(boneWorldPos(b)).normalize();
-    if (cur.lengthSq() < 0.5 || d.lengthSq() < 0.5) continue;
-    const qw = new THREE.Quaternion().setFromUnitVectors(cur, d);
-    const pq = b.parent ? b.parent.getWorldQuaternion(new THREE.Quaternion()) : new THREE.Quaternion();
-    b.quaternion.premultiply(pq.clone().invert().multiply(qw).multiply(pq));
-    b.updateMatrixWorld(true);
-  }
 }
 function centerLocal(obj, boneOf, scaleTo) {
   // 在父空间内：语义关节 x/z 居中、脚底贴地，可选按关节高度归一尺度
@@ -588,14 +590,14 @@ function centerRigGroup(g, rigHeads) {
   const minY = Math.min(...ps.map(p => p.y));
   g.position.set(-cx, -minY, -cz);
 }
-function cloneGhosted(src) {
+function cloneGhosted(src, opacity) {
   const c = src.clone(true);
   c.traverse(o => {
     if (o.isMesh && o.material) {
       o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
     }
   });
-  ghostObject(c, true);
+  ghostObject(c, true, opacity);
   return c;
 }
 async function enterReview() {
@@ -605,7 +607,7 @@ async function enterReview() {
     const mapping = await (await api(`/v1/jobs/${currentTaskId}/mapping`)).json();
     const loadSrc = () => new Promise((res, rej) =>
       loader.load(`/v1/jobs/${currentTaskId}/source.glb`, res, undefined, rej));
-    const [gA, gB] = await Promise.all([loadSrc(), loadSrc()]);
+    const gA = await loadSrc();
     exitReview();
     rvCmpWasOn = !!(cmpGroup && cmpGroup.visible);
     if (cmpGroup) cmpGroup.visible = false;
@@ -614,71 +616,70 @@ async function enterReview() {
     for (const [j, jd] of Object.entries((curRig && curRig.joints) || {})) rigHeads[j] = jd.head;
     const tys = Object.values(rigHeads).map(a => a[1]);
     const tgtH = (Math.max(...tys) - Math.min(...tys)) || 1;
-    // 三联纵深纵队（沿世界 Z 前后站排；列组旋转使模型正面朝向侧方相机）
+    // 三联前后纵队：沿角色朝向(+Z) 前后站排（①最前 ③最后）；列组只平移不旋转，
+    // 保证各列骨骼方向在全局一致、白线对应关系不失真
     const cols = [1, 0, -1].map(k => {
       const g = new THREE.Group();
-      g.rotation.y = Math.PI / 2;
       g.position.z = k * tgtH * 1.1;
       scene.add(g); rvParts.push(g);
       return g;
     });
-    // ① 源模型 + 其原生骨骼（保持原始姿势）；先在场景根下摆好再入列
+    // ① 源模型幽灵 + 其原生骨骼（保持原始姿势）；先在场景根下摆好再入列
     const srcA = gA.scene; scene.add(srcA); rvParts.push(srcA);
     const boneA = semanticBones(srcA, mapping);
     centerLocal(srcA, boneA, tgtH);
-    ghostObject(srcA, true);
+    srcA.traverse(o => { if (o.isMesh) o.visible = true; });
+    ghostObject(srcA, true, 0.45);   // 原地幽灵（不克隆，避免 SkinnedMesh 克隆丢骨骼）；0.45 保证深色模型可见
     cols[0].add(srcA);
     const helperA = buildBoneLines(srcA, 0x39d98a);
     scene.add(helperA); rvParts.push(helperA);
-    // ② 源剥离纯骨骼（摆成目标 rest pose，无网格）
-    const srcB = gB.scene; scene.add(srcB); rvParts.push(srcB);
-    const boneB = semanticBones(srcB, mapping);
-    poseToTargetPose(srcB, boneB, rigHeads);
-    centerLocal(srcB, boneB, tgtH);
-    srcB.traverse(o => { if (o.isMesh) o.visible = false; });  // 只隐网格，保留骨骼节点
-    cols[1].add(srcB);
-    const helperB = buildBoneLines(srcB, 0x39d98a);
-    scene.add(helperB); rvParts.push(helperB);
+    // ② 新绑定骨骼单独展示（=③里那副骨骼，无网格），便于看清骨骼本身
+    const rigC = buildRig(curRig); cols[1].add(rigC); rvParts.push(rigC);
+    centerRigGroup(rigC, rigHeads);
     // ③ 新绑定骨骼 + 目标模型（幽灵）
     const rigD = buildRig(curRig); cols[2].add(rigD); rvParts.push(rigD);
     centerRigGroup(rigD, rigHeads);
     if (curModel) {
-      const meshD = cloneGhosted(curModel); cols[2].add(meshD); rvParts.push(meshD);
+      const meshD = cloneGhosted(curModel, 0.45); cols[2].add(meshD); rvParts.push(meshD);
       meshD.position.copy(rigD.position);
     }
     scene.updateMatrixWorld(true);
-    // 对应骨骼点连线：①-②-③ 同一语义关节串起来
+    // ①列源骨骼上画语义关节点（与②③橙点同色），对应白线的端点即这些点
+    const dotsA = buildJointDots(boneA, 0xffb300); scene.add(dotsA); rvParts.push(dotsA);
+    // 对应骨骼点连线：只连 ①源关节-②绑定骨骼（②③是同一副骨骼，连线无意义）
     const pts = [];
     for (const j of Object.keys(SEM_PARENTS)) {
       const p1 = boneA[j] ? boneWorldPos(boneA[j]) : null;
-      const p2 = boneB[j] ? boneWorldPos(boneB[j]) : null;
       const h = rigHeads[j];
-      const p3 = h ? rigD.localToWorld(new THREE.Vector3(...h)) : null;
-      const chain = [p1, p2, p3].filter(Boolean);
+      const p2 = h ? rigC.localToWorld(new THREE.Vector3(...h)) : null;
+      const chain = [p1, p2].filter(Boolean);
       for (let i = 0; i + 1 < chain.length; i++) pts.push(chain[i].clone(), chain[i + 1].clone());
     }
     if (pts.length) {
       const lm = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35,
         depthTest: false, depthWrite: false });
+      lm.userData._rv = true;
       const ls = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lm);
       ls.renderOrder = 996; scene.add(ls); rvParts.push(ls);
     }
     // 主画布原模型/骨骼隐藏，避免与纵队重叠
     if (curModel) curModel.visible = false;
     if (rigGroup) rigGroup.visible = false;
-    // 相机摆到侧前方：纵队在屏幕上等宽并排，白线水平连接同名关节
+    // 相机摆在纵队正前方偏右上：三对象前后站排、向纵深退去，正面可见
     const box = new THREE.Box3();
     pts.forEach(p => box.expandByPoint(p));
+    // 白线只覆盖①②列：取景框额外纳入③列关节，保证三列都在画面内
+    for (const h of Object.values(rigHeads)) box.expandByPoint(rigD.localToWorld(new THREE.Vector3(...h)));
     if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(0, tgtH / 2, 0),
       new THREE.Vector3(tgtH, tgtH, tgtH * 3));
     const c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
     controls.target.copy(c);
-    camera.position.copy(c).add(new THREE.Vector3(maxDim * 1.35, maxDim * 0.25, maxDim * 0.5));
+    camera.position.copy(c).add(new THREE.Vector3(maxDim * 0.7, maxDim * 0.35, maxDim * 1.3));
     controls.update();
     rvOn = true;
     document.getElementById('btnReviewView').classList.add('on');
-    log('审核纵队：①源+骨骼 ②源纯骨骼 ③绑定骨骼+目标；白线=对应关节（绕到正面可叠影对比）');
+    log('审核纵队：①源+骨骼 ②绑定骨骼(单独) ③绑定骨骼+目标，前后站排；白线=对应关节');
   } catch (e) { log('审核视图加载失败：' + e.message); }
 }
 function exitReview() {
@@ -688,9 +689,10 @@ function exitReview() {
       if (n.geometry) n.geometry.dispose();
       if (n.material) {
         const ms = Array.isArray(n.material) ? n.material : [n.material];
-        ms.forEach(m => { if (m.userData && m.userData._ghosted) m.dispose(); });
+        ms.forEach(m => { if (m.userData && (m.userData._ghosted || m.userData._rv)) m.dispose(); });
       }
     });
+    if (o.userData && o.userData._rvGeo) o.userData._rvGeo.dispose();
   });
   rvParts = [];
   rvOn = false;
@@ -746,6 +748,9 @@ function renderTaskInfo(info) {
   if (kinds.includes('source')) html += `<a class="dl" href="/v1/jobs/${info.task_id}/source.glb" download>⬇ source.glb</a>`;
   if (kinds.includes('result')) html += `<a class="dl" href="/v1/jobs/${info.task_id}/result.glb" download>⬇ result.glb</a>`;
   dl.innerHTML = html;
+  // 结果产物存在（含 NEEDS_REVIEW 审核态）即提供结果动画预览入口
+  document.getElementById('btnPreviewResult').style.display =
+    kinds.includes('result') ? 'inline-block' : 'none';
   document.getElementById('ovStatus').innerHTML =
     `任务 <b>${info.task_id}</b> · <span class="badge b-${info.state}">${info.state}</span>` +
     (info.current_stage ? ` · ${info.current_stage}` : '');
@@ -802,10 +807,15 @@ async function listTasks() {
     box.innerHTML = j.tasks.map(t =>
       `<div class="taskitem" data-id="${t.task_id}">
          <span>${t.name || t.task_id} <span class="muted">${t.task_id}</span></span>
-         <span class="badge b-${t.state}">${t.state}</span>
+         <span class="tiRight">
+           <span class="badge b-${t.state}">${t.state}</span>
+           <button class="tdel" data-del="${t.task_id}" title="删除任务">🗑</button>
+         </span>
        </div>`).join('');
     box.querySelectorAll('.taskitem').forEach(el =>
       el.onclick = () => openTask(el.dataset.id));
+    box.querySelectorAll('.tdel').forEach(btn =>
+      btn.onclick = (e) => { e.stopPropagation(); deleteTask(btn.dataset.del); });
   } catch (e) { log('列表失败：' + e.message); }
 }
 
@@ -883,6 +893,18 @@ function backToList() {
   document.getElementById('viewList').style.display = 'block';
   clearModel();
   listTasks();
+}
+
+// 删除任务（连同上传件与产物）；在详情页删当前任务则回列表
+async function deleteTask(taskId) {
+  if (!taskId) return;
+  if (!confirm(`确认删除任务 ${taskId}？上传的模型与所有产物文件将一并删除，不可恢复。`)) return;
+  try {
+    await api(`/v1/jobs/${taskId}`, { method: 'DELETE' });
+    log('已删除任务 ' + taskId);
+    if (currentTaskId === taskId) backToList();
+    else listTasks();
+  } catch (e) { log('删除失败：' + e.message); }
 }
 
 // ---------------- 多视角离屏渲染 + 回传 ----------------
@@ -1028,6 +1050,16 @@ document.getElementById('btnResolve').onclick = async () => {
     startPoll();
   } catch (e) { log('重跑失败：' + e.message); }
 };
+// 结果动画预览：审核态轮询已停、主画布停在静态目标模型，需手动入口加载 result.glb
+document.getElementById('btnPreviewResult').onclick = () => {
+  if (!currentTaskId) return;
+  if (rvOn) exitReview();
+  // 结果网格自带蒙皮动画：静态 rest rig 叠层会随播放错位，切纯模型视图
+  viewMode = 'mesh'; syncViewBar();
+  loadPreview(`/v1/jobs/${currentTaskId}/result.glb`, { play: true })
+    .then(() => log('结果动画预览中：底部播放条可暂停/拖进度，右上小窗为源动画对照'))
+    .catch(e => log('结果预览失败：' + e.message));
+};
 document.getElementById('btnRetargetReupload').onclick = () => {
   document.getElementById('tgtPick').style.display = 'block';
   document.getElementById('tgtDone').style.display = 'none';
@@ -1037,6 +1069,7 @@ document.getElementById('btnSourceReupload').onclick = () => {
   document.getElementById('srcDone').style.display = 'none';
 };
 document.getElementById('btnBackList').onclick = backToList;
+document.getElementById('btnDeleteTask').onclick = () => deleteTask(currentTaskId);
 
 // 初始化
 (async function init() {
