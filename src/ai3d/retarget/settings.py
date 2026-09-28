@@ -87,7 +87,7 @@ class SkinConfig:
     max_influences: int = 4            # 每顶点最大骨骼影响数
     weld_epsilon: float = 2e-3         # 求解域焊接合并半径(m)；=0 关闭合并退化为逐岛
     handle_margin: float = 0.25        # handle 选骨容差 = d_min + margin*分量 bbox 对角
-    max_handles: int = 3               # 单分量最大 handle 骨数
+    max_handles: int = 22              # 单分量 handle 骨上限；全身大分量需全骨 handle，小甲片由 handle_margin 自动收敛
     bbw_max_verts: int = 30000         # 分量顶点超阈走 igl.decimate 代理求解+最近邻传回
 
 

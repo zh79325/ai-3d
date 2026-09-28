@@ -48,7 +48,7 @@ skin:
   max_influences: 4
   weld_epsilon: 0.002
   handle_margin: 0.25
-  max_handles: 3
+  max_handles: 22
   bbw_max_verts: 30000
 
 # 源骨映射

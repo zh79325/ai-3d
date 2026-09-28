@@ -1,7 +1,8 @@
 """基于 libigl BBW（Bounded Biharmonic Weights）的确定性自动蒙皮。
 
 流程：求解域焊接合并（位置近接触聚簇，导出网格不动）→ 连通分量 →
-逐分量骨段距离选 handle →（高模分量经 igl.decimate 代理）igl.bbw 求解 →
+主分量（身体壳）骨段距离选 handle →（高模分量经 igl.decimate 代理）igl.bbw
+求解 → 其余分量（衣服/附件）最近邻继承主分量权重（同变形不穿模）→
 按簇散射回原顶点 → 退化兜底最近骨 one-hot → 行归一 + top-K →
 输出 JOINTS_0(u16)/WEIGHTS_0(f32)，并附质量报告（岛统计/权重跳变/合成姿势应变）。
 
@@ -84,10 +85,13 @@ def _components(F: np.ndarray, n: int) -> Tuple[int, np.ndarray]:
 
 
 def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
-    """按骨段距离选 handle 骨，返回 [(局部顶点, handle 列, 关节索引)]。
+    """按骨段距离选 handle 骨，返回 [(约束顶点数组, 关节索引)]。
 
-    H = 距离 top-max_handles 且 d_j <= d_min + handle_margin*分量对角；必含最近骨；
-    每骨 handle 顶点 = 分量内离该骨段最近顶点；同顶点被多骨抢占保留更近者。
+    H = d_j <= d_min + handle_margin*分量对角 的骨（上限 max_handles）；每骨约束
+    顶点 = 骨段中段（投影参数 0.3~0.7）、贴近骨段、且明确胜出（d1 <= 0.8*d2）
+    的顶点；胯部/关节等距区留白由 BBW 谐波混合，避免两骨约束带相邻硬碰硬
+    产生权重断崖；末端骨（头/手/脚）约束带放宽到 t∈[0.2,1.35] 整块刚性带动，
+    避免面部/手指落在谐波混合区被剪切；无约束顶点时退化为离骨段中点最近顶点。
     """
     D = _all_segment_distances(Vk, segs)                 # (nv, nj)
     dmin = D.min(axis=0)
@@ -97,15 +101,40 @@ def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
     picked = [int(j) for j in order if dmin[j] <= thr][: int(cfg.max_handles)]
     if not picked:
         picked = [int(order[0])]
-    handles: List[Tuple[int, int, int]] = []
-    used: Dict[int, int] = {}
+    Dp = D[:, picked]                                    # (nv, ns)
+    if len(picked) >= 2:
+        srt = np.sort(Dp, axis=1)
+        clear = srt[:, 0] <= 0.8 * srt[:, 1]
+        nearest_sel = np.argmin(Dp, axis=1)
+    else:
+        clear = np.ones(len(Vk), bool)
+        nearest_sel = np.zeros(len(Vk), np.int64)
+    band_r = dmin + 0.05 * diag                          # 中段带的贴骨距离上限
+    claim: Dict[int, Tuple[float, int]] = {}             # 顶点 -> (距离, 列)
     for col, ji in enumerate(picked):
-        v = int(np.argmin(D[:, ji]))
-        if v in used:
-            continue
-        used[v] = col
-        handles.append((v, col, ji))
-    return handles
+        a, b = segs[ji][1], segs[ji][2]
+        ab = b - a
+        l2 = float(ab @ ab)
+        t = ((Vk - a) @ ab) / l2 if l2 > 1e-12 else np.zeros(len(Vk))
+        if children_of(JOINTS[ji]):                      # 非末端骨：中段带
+            tlo, thi, rad = 0.3, 0.7, band_r[ji]
+        else:                                            # 末端骨：整块刚性带
+            tlo, thi, rad = 0.2, 1.35, band_r[ji] + 0.03 * diag
+        cand = np.nonzero((t >= tlo) & (t <= thi) & (D[:, ji] <= rad)
+                          & clear & (nearest_sel == col))[0]
+        if len(cand) == 0:                               # 退化：取离骨段中点最近顶点
+            mid = 0.5 * (a + b)
+            cand = np.array([int(np.argmin(np.linalg.norm(Vk - mid, axis=1)))])
+        for v in cand:
+            v = int(v)
+            d = float(D[v, ji])
+            if v not in claim or d < claim[v][0]:
+                claim[v] = (d, col)
+    by_col: Dict[int, List[int]] = {}
+    for v, (_d, col) in claim.items():
+        by_col.setdefault(col, []).append(v)
+    return [(np.array(sorted(vs), np.int64), picked[col])
+            for col, vs in sorted(by_col.items())]
 
 
 def _bbw_component(Vk: np.ndarray, Fk: np.ndarray, handles, cfg: SkinConfig):
@@ -117,8 +146,12 @@ def _bbw_component(Vk: np.ndarray, Fk: np.ndarray, handles, cfg: SkinConfig):
     import igl  # 延迟导入：libigl 缺失时在求解点报错而非导入期
     V = np.ascontiguousarray(Vk, np.float64)
     F = np.ascontiguousarray(Fk, np.int64)
-    b = np.array([h[0] for h in handles], np.int64)
-    bc = np.eye(len(handles))
+    b = np.concatenate([h[0] for h in handles]).astype(np.int64)
+    bc = np.zeros((len(b), len(handles)))
+    off = 0
+    for col, (verts, _ji) in enumerate(handles):
+        bc[off:off + len(verts), col] = 1.0
+        off += len(verts)
     proxy_used = False
     transferred = 0
     if len(V) > int(cfg.bbw_max_verts):
@@ -130,13 +163,13 @@ def _bbw_component(Vk: np.ndarray, Fk: np.ndarray, handles, cfg: SkinConfig):
         b2: List[int] = []
         bc2: List[np.ndarray] = []
         seen: Dict[int, int] = {}
-        for col, hv in enumerate(hidx):
+        for i, hv in enumerate(hidx):
             hv = int(hv)
             if hv in seen:
                 continue
             seen[hv] = len(b2)
             b2.append(hv)
-            bc2.append(bc[col])
+            bc2.append(bc[i])
         if not b2:
             raise RuntimeError("decimate 代理丢失全部 handle")
         Wp = igl.bbw(U, G, np.array(b2, np.int64), np.asarray(bc2, np.float64),
@@ -267,14 +300,35 @@ def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
     ncomp, lab = _components(Fp, len(Vp))
     comp_of_orig = lab[cluster_of]
     fallback = proxy_comps = transferred = 0
-    for k in range(ncomp):
+    primary = 0
+    if ncomp > 1:
+        # 主分量 = 多数关节最近顶点所在分量（身体壳）；其余分量（衣服/附件）
+        # 不独立求解，最近邻继承主分量权重，与身体同变形避免穿模
+        votes = np.bincount(lab[np.argmin(_all_segment_distances(Vp, segs), axis=0)],
+                            minlength=ncomp)
+        primary = int(np.argmax(votes))
+    prim_V = prim_W = None
+    for k in [primary] + [q for q in range(ncomp) if q != primary]:
         sk = np.nonzero(lab == k)[0]
         ov = np.nonzero(comp_of_orig == k)[0]
         if len(ov) == 0:
             continue
-        Vk = Vp[sk]
         loc = -np.ones(len(Vp), np.int64)
         loc[sk] = np.arange(len(sk))
+        if k != primary:
+            if prim_W is None:                           # 主分量求解失败落兜底
+                fallback += 1
+                W[ov, np.argmin(_all_segment_distances(P[ov], segs), axis=1)] = 1.0
+                continue
+            _, idx = cKDTree(prim_V).query(Vp[sk], k=min(8, len(prim_V)))
+            idx = np.atleast_2d(idx)
+            dd = 1.0 / (np.linalg.norm(
+                Vp[sk][:, None, :] - prim_V[idx], axis=2) + 1e-4)
+            dd /= dd.sum(1, keepdims=True)
+            W[ov] = np.einsum("nk,nkj->nj", dd, prim_W[idx])[loc[cluster_of[ov]]]
+            transferred += len(sk)
+            continue
+        Vk = Vp[sk]
         Fk = loc[Fp[np.nonzero(lab[Fp[:, 0]] == k)[0]]] if len(Fp) else Fp
         Wk = None
         handles = _component_handles(Vk, segs, cfg) if len(sk) >= 4 else []
@@ -293,9 +347,10 @@ def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
         rs = Wk.sum(1, keepdims=True)
         rs[rs < 1e-9] = 1.0
         Wk /= rs
-        col_to_joint = np.array([h[2] for h in handles], np.int64)
+        col_to_joint = np.array([h[1] for h in handles], np.int64)
         Wc = np.zeros((len(sk), nj))
         Wc[:, col_to_joint] = Wk
+        prim_V, prim_W = Vk, Wc
         W[ov] = Wc[loc[cluster_of[ov]]]
 
     rs = W.sum(1, keepdims=True)

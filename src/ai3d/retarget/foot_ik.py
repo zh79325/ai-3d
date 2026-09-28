@@ -157,8 +157,8 @@ def apply_foot_lock(rig: Rig, rotations: Dict[str, np.ndarray],
     for side in ("l", "r"):
         hip_j, knee_j, ankle_j = f"upper_leg_{side}", f"lower_leg_{side}", f"foot_{side}"
         ankle = P[ankle_j]
-        xz = ankle[:, [0, 2]]
-        speed = np.linalg.norm(np.gradient(xz, axis=0) / dt[:, None], axis=1)
+        # 3D 速度：只看 xz 会把原地踏步（踝垂直运动大、水平几乎不动）误判为支撑相
+        speed = np.linalg.norm(np.gradient(ankle, axis=0) / dt[:, None], axis=1)
         contact = (ankle[:, 1] < h_thresh) & (speed < cfg.foot_contact_speed)
         info["contact_frames"][side] = int(contact.sum())
         wins = _contact_windows(contact, int(cfg.foot_min_contact_frames))
