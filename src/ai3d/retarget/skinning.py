@@ -93,6 +93,30 @@ def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
         rs = W.sum(1, keepdims=True); rs[rs < 1e-9] = 1.0
         W = W / rs
 
+    # 附件岛刚性化：装甲片/挂饰等独立连通壳若聚合权重集中于单骨，
+    # 整岛 one-hot，避免刚性壳被多骨混合权重拉弯/半途滞留成碎片；
+    # 分散岛（体表马赛克）保持平滑权重以维持缝连续
+    if cfg.rigid_island_share > 0 and n > 0 and len(indices) >= 3:
+        from scipy.sparse.csgraph import connected_components
+        tri = np.asarray(indices).reshape(-1, 3).astype(np.int64)
+        r = np.concatenate([tri[:, 0], tri[:, 1], tri[:, 2]])
+        c = np.concatenate([tri[:, 1], tri[:, 2], tri[:, 0]])
+        A = sparse.coo_matrix((np.ones(len(r), np.int8), (r, c)),
+                              shape=(n, n)).tocsr()
+        ncomp, lab = connected_components(A, directed=False)
+        if ncomp > 1:
+            for k in range(ncomp):
+                sel = lab == k
+                agg = W[sel].sum(0)
+                tot = agg.sum()
+                if tot <= 1e-9:
+                    continue
+                agg = agg / tot
+                j = int(np.argmax(agg))
+                if agg[j] >= float(cfg.rigid_island_share):
+                    W[sel] = 0.0
+                    W[sel, j] = 1.0
+
     # top-K 影响 + 归一化
     k = max(1, min(int(cfg.max_influences), nj))
     joints = np.zeros((n, 4), dtype=np.uint16)

@@ -244,31 +244,89 @@ def read_accessor(g, accessor_index: int) -> np.ndarray:
     return out
 
 
+def _node_local_matrix(n) -> np.ndarray:
+    """节点局部矩阵：优先 matrix 字段，否则 T·R·S（rotation 为 xyzw 四元数）。"""
+    if getattr(n, "matrix", None) is not None:
+        return np.asarray(n.matrix, np.float64).reshape(4, 4, order="F").copy()
+    t = np.asarray(getattr(n, "translation", None) or [0, 0, 0], np.float64)
+    r = np.asarray(getattr(n, "rotation", None) or [0, 0, 0, 1], np.float64)
+    s = np.asarray(getattr(n, "scale", None) or [1, 1, 1], np.float64)
+    x, y, z, w = r
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    M = np.eye(4)
+    M[:3, :3] = R @ np.diag(s)
+    M[:3, 3] = t
+    return M
+
+
+def _global_matrices(g) -> Dict[int, np.ndarray]:
+    """每节点全局矩阵（含 canon_axis_root 等校正节点）。"""
+    nodes = getattr(g, "nodes", []) or []
+    parent = {c: i for i, n in enumerate(nodes) for c in (n.children or [])}
+    cache: Dict[int, np.ndarray] = {}
+
+    def gm(i: int, guard: int = 0) -> np.ndarray:
+        if i in cache:
+            return cache[i]
+        if guard > 4096 or not (0 <= i < len(nodes)):
+            return np.eye(4)
+        M = _node_local_matrix(nodes[i])
+        p = parent.get(i)
+        M = gm(p, guard + 1) @ M if p is not None else M
+        cache[i] = M
+        return M
+
+    for i in range(len(nodes)):
+        gm(i)
+    return cache
+
+
 def merge_mesh(g) -> Dict[str, Any]:
-    """合并所有 mesh/primitive 的顶点与索引（单一 POSITION/NORMAL/indices）。"""
+    """合并所有 mesh/primitive 的顶点与索引（单一 POSITION/NORMAL/indices）。
+
+    顶点/法线乘以所属节点的全局变换（多实例节点重复展开；无节点引用的 mesh
+    用单位阵）。轴系归一插入的 canon_axis_root 旋转只存在于节点树，不应用
+    则 numpy 侧空间与渲染侧/骨架空间错位。
+    """
     positions: List[np.ndarray] = []
     normals: List[np.ndarray] = []
     indices: List[np.ndarray] = []
     voff = 0
     has_normals = True
-    for mesh in (getattr(g, "meshes", []) or []):
+    gmats = _global_matrices(g)
+    mesh_mats: Dict[int, List[np.ndarray]] = {}
+    for i, n in enumerate(getattr(g, "nodes", []) or []):
+        if getattr(n, "mesh", None) is not None:
+            mesh_mats.setdefault(n.mesh, []).append(gmats[i])
+    for mi, mesh in enumerate(getattr(g, "meshes", []) or []):
+        mats = mesh_mats.get(mi) or [np.eye(4)]
         for prim in (mesh.primitives or []):
             attrs = prim.attributes
             if attrs.POSITION is None:
                 continue
             pos = read_accessor(g, attrs.POSITION).astype(np.float32)
-            positions.append(pos)
             if attrs.NORMAL is not None:
-                normals.append(read_accessor(g, attrs.NORMAL).astype(np.float32))
+                nor = read_accessor(g, attrs.NORMAL).astype(np.float32)
             else:
                 has_normals = False
-                normals.append(np.zeros_like(pos))
+                nor = np.zeros_like(pos)
             if prim.indices is not None:
-                idx = read_accessor(g, prim.indices).astype(np.uint32).ravel() + voff
+                idx0 = read_accessor(g, prim.indices).astype(np.uint32).ravel()
             else:
-                idx = np.arange(voff, voff + len(pos), dtype=np.uint32)
-            indices.append(idx)
-            voff += len(pos)
+                idx0 = np.arange(len(pos), dtype=np.uint32)
+            for M in mats:
+                R3 = M[:3, :3]
+                pt = (pos @ R3.T.astype(np.float32)) + M[:3, 3].astype(np.float32)
+                nt = nor @ R3.T.astype(np.float32)
+                ln = np.linalg.norm(nt, axis=1, keepdims=True)
+                nt = np.divide(nt, ln, out=np.zeros_like(nt), where=ln > 1e-8)
+                positions.append(pt)
+                normals.append(nt)
+                indices.append(idx0 + voff)
+                voff += len(pos)
     if not positions:
         return {"positions": np.zeros((0, 3), np.float32),
                 "normals": np.zeros((0, 3), np.float32),

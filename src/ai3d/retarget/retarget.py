@@ -1,11 +1,12 @@
 """动画重定向：把源骨架动画烘焙到 22 语义骨架（P1 确定性路径）。
 
-核心思路（局部增量传递）：
-- 目标骨架采用 identity-rest 设计（关节 rest 局部旋转=单位，骨向由平移编码），
-  故对每个语义关节，输出局部旋转 = 源 rest 旋转到源动画旋转的「增量」：
-      R_tgt[f] = R_src_rest^-1 * R_src_anim[f]
-  当源同样为 identity-rest（合成源）时 R_src_rest=单位，R_tgt[f]=R_src_anim[f]，精确传递。
-- root motion：骨盆平移增量按身高比例缩放后叠加到目标骨盆 head。
+核心思路（局部增量传递 + rest 朝向共轭）：
+- 目标骨架采用 identity-rest 设计（关节 rest 局部旋转=单位、局部系即世界系，骨向由平移编码）。
+- 源关节动画增量 D = R_src_rest^-1 * R_src_anim 表达在源骨 rest 局部系，须共轭到世界系再输出：
+      R_tgt[f] = A * D * A^-1，A = 源关节 rest 全局旋转（含 canon_axis_root 校正）。
+  缺这步共轭会把源骨 rest 朝向差当成动画叠加、沿链累积成严重扭曲；
+  源为 identity-rest（合成源）时 A=单位，退化为 R_tgt[f]=R_src_anim[f] 精确传递。
+- root motion：骨盆平移增量先乘父链 rest 旋转转到世界系，再按身高比例缩放叠加到目标骨盆 head。
 - 逐帧采样：rotation 用 slerp、translation 用 lerp，统一到输出时间轴（bake_fps>0 时重采样）。
 
 P3 再补：脊柱骨数不匹配按骨长分配、脚部接触检测 + 双骨 IK、rest 姿态对齐校正。
@@ -172,6 +173,35 @@ def _node_rest_translation(node: Dict[str, Any]) -> np.ndarray:
     return np.zeros(3)
 
 
+def _node_parent_map(nodes: List[Dict[str, Any]]) -> Dict[int, Optional[int]]:
+    parent: Dict[int, Optional[int]] = {n["index"]: None for n in nodes}
+    for n in nodes:
+        for c in n.get("children") or []:
+            parent[c] = n["index"]
+    return parent
+
+
+def _global_rest_rotations(nodes: List[Dict[str, Any]]) -> Dict[int, np.ndarray]:
+    """每节点全局 rest 旋转（3x3），自场景根累加（含 canon_axis_root 校正节点）。"""
+    parent = _node_parent_map(nodes)
+    cache: Dict[int, np.ndarray] = {}
+
+    def rot(ni: int, guard: int = 0) -> np.ndarray:
+        if ni in cache:
+            return cache[ni]
+        if guard > 4096 or not (0 <= ni < len(nodes)):
+            return np.eye(3)
+        R = quat_to_matrix(_node_rest_quat(nodes[ni]))
+        p = parent.get(ni)
+        M = R if p is None else rot(p, guard + 1) @ R
+        cache[ni] = M
+        return M
+
+    for n in nodes:
+        rot(n["index"])
+    return cache
+
+
 def _global_rest_positions(skin: Dict[str, Any],
                            nodes: List[Dict[str, Any]]) -> Dict[int, np.ndarray]:
     """关节全局 rest 位置：优先用 inverseBindMatrix 求逆，缺失则沿层级累加。"""
@@ -259,7 +289,10 @@ def retarget_animation(source_glb: str | Path, mapping: Dict[str, Any], rig: Rig
 
     sem_to_node: Dict[str, Optional[int]] = mapping.get("semantic_to_source_node", {}) or {}
 
-    # 每关节局部旋转增量
+    # 每关节局部旋转增量，再共轭到世界轴：A 为源关节 rest 全局旋转，把「源骨 rest
+    # 局部系」下的增量转到世界系（目标 identity-rest 的局部系即世界系）
+    rest_rot = _global_rest_rotations(nodes)
+    parent_of = _node_parent_map(nodes)
     rotations: Dict[str, np.ndarray] = {}
     for j in JOINTS:
         sn = sem_to_node.get(j)
@@ -272,7 +305,9 @@ def retarget_animation(source_glb: str | Path, mapping: Dict[str, Any], rig: Rig
             r_anim = np.tile(r_rest, (n_frames, 1))
         else:
             r_anim = sample_rotation(rc["times"], rc["values"], out_times)
-        rotations[j] = quat_mul(quat_inv(r_rest), r_anim)
+        d = quat_mul(quat_inv(r_rest), r_anim)
+        a = matrix_to_quat(rest_rot[sn])
+        rotations[j] = quat_mul(a, quat_mul(d, quat_inv(a)))
 
     # root motion（骨盆平移）
     pelvis_head = np.asarray(rig.heads["pelvis"], np.float64)
@@ -284,7 +319,12 @@ def retarget_animation(source_glb: str | Path, mapping: Dict[str, Any], rig: Rig
             t_anim = sample_translation(tc["times"], tc["values"], out_times)
         else:
             t_anim = np.tile(t_rest, (n_frames, 1))
-        root_t = pelvis_head + (t_anim - t_rest) * height_scale
+        # 平移增量在父节点局部系：乘父链 rest 旋转转到世界系（轴系校正在此生效）
+        delta = t_anim - t_rest
+        pr = parent_of.get(pn)
+        if pr is not None and pr in rest_rot:
+            delta = delta @ rest_rot[pr].T
+        root_t = pelvis_head + delta * height_scale
     else:
         root_t = np.tile(pelvis_head, (n_frames, 1))
 

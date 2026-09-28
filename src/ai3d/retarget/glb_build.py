@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from pygltflib import (
@@ -33,10 +34,13 @@ from pygltflib import (
     Node,
     PbrMetallicRoughness,
     Primitive,
+    Sampler,
     Scene,
     Skin,
+    Texture,
 )
 
+from . import glb_io
 from .skeleton import JOINTS, JOINT_INDEX, children_of
 
 
@@ -58,12 +62,7 @@ class _Builder:
             count: Optional[int] = None) -> int:
         arr = np.ascontiguousarray(arr)
         raw = arr.tobytes()
-        self._pad(4)
-        off = len(self.blob)
-        self.blob.extend(raw)
-        bv_idx = len(self.buffer_views)
-        self.buffer_views.append(
-            BufferView(buffer=0, byteOffset=off, byteLength=len(raw), target=target))
+        bv_idx = self.add_raw(raw, target)
         n = arr.shape[0] if count is None else count
         kw = dict(bufferView=bv_idx, componentType=comp, count=n, type=gltf_type)
         if minmax and n > 0:
@@ -73,6 +72,16 @@ class _Builder:
         acc_idx = len(self.accessors)
         self.accessors.append(Accessor(**kw))
         return acc_idx
+
+    def add_raw(self, raw: bytes, target: Optional[int] = None) -> int:
+        """裸字节 bufferView（image 等无 accessor 数据用）。"""
+        self._pad(4)
+        off = len(self.blob)
+        self.blob.extend(raw)
+        bv_idx = len(self.buffer_views)
+        self.buffer_views.append(
+            BufferView(buffer=0, byteOffset=off, byteLength=len(raw), target=target))
+        return bv_idx
 
 
 def _compute_normals(positions: np.ndarray, indices: np.ndarray) -> np.ndarray:
@@ -87,6 +96,123 @@ def _compute_normals(positions: np.ndarray, indices: np.ndarray) -> np.ndarray:
     return np.divide(n, vn, out=n, where=vn > 1e-8).astype(np.float32)
 
 
+def _src_chunks(src_gltf, n_verts: int) -> List[Tuple[Any, int, int, int, int]]:
+    """按 merge_mesh 的 chunk 顺序（meshes×prims×节点实例）切片。
+
+    返回 [(prim, vcount, voff, icount, ioff)]：顶点与索引两套偏移（索引空间
+    与顶点空间长度不同，不可混用）；与合并顶点数不匹配时返回 []（回退单 primitive）。
+    """
+    if src_gltf is None or not getattr(src_gltf, "meshes", None):
+        return []
+    inst: Dict[int, int] = {}
+    for nd in (getattr(src_gltf, "nodes", []) or []):
+        if getattr(nd, "mesh", None) is not None:
+            inst[nd.mesh] = inst.get(nd.mesh, 0) + 1
+    chunks: List[Tuple[Any, int, int, int, int]] = []
+    voff = ioff = 0
+    for mi, sm in enumerate(src_gltf.meshes):
+        for prim in (sm.primitives or []):
+            if prim.attributes.POSITION is None:
+                continue
+            cnt = src_gltf.accessors[prim.attributes.POSITION].count
+            icnt = (src_gltf.accessors[prim.indices].count
+                    if prim.indices is not None else cnt)
+            for _ in range(inst.get(mi, 1)):
+                chunks.append((prim, cnt, voff, icnt, ioff))
+                voff += cnt
+                ioff += icnt
+    return chunks if voff == n_verts else []
+
+
+def _image_bytes(g, img) -> Optional[bytes]:
+    """取源 glb 内嵌图片字节（bufferView 或 data URI）。"""
+    if img.bufferView is not None:
+        blob = g.binary_blob()
+        if blob:
+            bv = g.bufferViews[img.bufferView]
+            off = bv.byteOffset or 0
+            return bytes(blob[off:off + bv.byteLength])
+    uri = getattr(img, "uri", None)
+    if uri and uri.startswith("data:"):
+        import base64
+        _, _, b64 = uri.partition(",")
+        try:
+            return base64.b64decode(b64)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _copy_materials(g, b: "_Builder", used_mats: set):
+    """把源 glb 的材质/纹理/采样器/图片拷入新 blob，返回新列表与材质索引 remap。"""
+    mats_src = g.materials or []
+    texs_src = g.textures or []
+    sams_src = g.samplers or []
+    imgs_src = g.images or []
+    new_mats: List[Material] = []
+    new_texs: List[Texture] = []
+    new_sams: List[Sampler] = []
+    new_imgs = []
+    sam_remap: Dict[int, int] = {}
+    tex_remap: Dict[int, Optional[int]] = {}
+    mat_remap: Dict[int, int] = {}
+
+    def remap_sampler(si):
+        if si is None or si >= len(sams_src):
+            return None
+        if si not in sam_remap:
+            new_sams.append(copy.deepcopy(sams_src[si]))
+            sam_remap[si] = len(new_sams) - 1
+        return sam_remap[si]
+
+    def remap_tex(ti):
+        if ti is None or ti >= len(texs_src):
+            return None
+        if ti not in tex_remap:
+            src = texs_src[ti]
+            new_img = None
+            if src.source is not None and src.source < len(imgs_src):
+                data = _image_bytes(g, imgs_src[src.source])
+                if data:
+                    ni = copy.deepcopy(imgs_src[src.source])
+                    ni.uri = None
+                    ni.bufferView = b.add_raw(data)
+                    new_imgs.append(ni)
+                    new_img = len(new_imgs) - 1
+            if new_img is None:
+                tex_remap[ti] = None
+            else:
+                new_texs.append(Texture(sampler=remap_sampler(src.sampler),
+                                        source=new_img))
+                tex_remap[ti] = len(new_texs) - 1
+        return tex_remap[ti]
+
+    def fix_ref(holder, attr):
+        ref = getattr(holder, attr, None)
+        if ref is None or getattr(ref, "index", None) is None:
+            return
+        ni = remap_tex(ref.index)
+        if ni is None:
+            setattr(holder, attr, None)
+        else:
+            ref.index = ni
+
+    for mi in sorted(used_mats):
+        if mi is None or mi >= len(mats_src):
+            continue
+        m = copy.deepcopy(mats_src[mi])
+        pbr = m.pbrMetallicRoughness
+        if pbr is not None:
+            fix_ref(pbr, "baseColorTexture")
+            fix_ref(pbr, "metallicRoughnessTexture")
+        fix_ref(m, "normalTexture")
+        fix_ref(m, "occlusionTexture")
+        fix_ref(m, "emissiveTexture")
+        new_mats.append(m)
+        mat_remap[mi] = len(new_mats) - 1
+    return new_mats, new_texs, new_sams, new_imgs, mat_remap
+
+
 def build_result_glb(
     mesh: Dict[str, np.ndarray],
     heads: Dict[str, np.ndarray],
@@ -96,6 +222,7 @@ def build_result_glb(
     rotations: Dict[str, np.ndarray],   # joint -> (F,4) 四元数(x,y,z,w)
     root_translations: Optional[np.ndarray],  # (F,3) pelvis 绝对局部平移
     out_path: str | Path,
+    src_gltf=None,                       # 源目标 glb：提供时保留原材质/UV/纹理
     anim_name: str = "retarget",
 ) -> Path:
     positions = np.ascontiguousarray(mesh["positions"], dtype=np.float32)
@@ -110,14 +237,18 @@ def build_result_glb(
     idx_arr = indices.astype(np.uint16 if use_u16_idx else np.uint32)
 
     b = _Builder()
-    acc_pos = b.add(positions, "VEC3", FLOAT, ARRAY_BUFFER, minmax=True)
-    acc_nor = b.add(normals, "VEC3", FLOAT, ARRAY_BUFFER)
-    acc_idx = b.add(idx_arr, "SCALAR", UNSIGNED_SHORT if use_u16_idx else UNSIGNED_INT,
-                    ELEMENT_ARRAY_BUFFER)
-    acc_joints = b.add(np.ascontiguousarray(joints_u16, dtype=np.uint16), "VEC4",
-                       UNSIGNED_SHORT, ARRAY_BUFFER)
-    acc_weights = b.add(np.ascontiguousarray(weights_f32, dtype=np.float32), "VEC4",
-                        FLOAT, ARRAY_BUFFER)
+    chunks = _src_chunks(src_gltf, n_verts)
+    if not chunks:
+        use_u16_idx = n_verts < 65536
+        acc_pos = b.add(positions, "VEC3", FLOAT, ARRAY_BUFFER, minmax=True)
+        acc_nor = b.add(normals, "VEC3", FLOAT, ARRAY_BUFFER)
+        acc_idx = b.add(idx_arr, "SCALAR",
+                        UNSIGNED_SHORT if use_u16_idx else UNSIGNED_INT,
+                        ELEMENT_ARRAY_BUFFER)
+        acc_joints = b.add(np.ascontiguousarray(joints_u16, dtype=np.uint16), "VEC4",
+                           UNSIGNED_SHORT, ARRAY_BUFFER)
+        acc_weights = b.add(np.ascontiguousarray(weights_f32, dtype=np.float32), "VEC4",
+                            FLOAT, ARRAY_BUFFER)
 
     # 逆绑定矩阵（列主序 16 float）：translate(-head)
     nj = len(JOINTS)
@@ -172,21 +303,59 @@ def build_result_glb(
     mesh_node_idx = len(nodes)
     nodes.append(Node(name="target_mesh", mesh=0, skin=0))
 
-    material = Material(
-        name="mat", doubleSided=True,
-        pbrMetallicRoughness=PbrMetallicRoughness(
-            baseColorFactor=[0.82, 0.84, 0.88, 1.0], metallicFactor=0.0, roughnessFactor=0.75))
+    if chunks:
+        used_mats = {p.material for (p, _, _, _, _) in chunks if p.material is not None}
+        materials_out, textures_out, samplers_out, images_out, mat_remap = \
+            _copy_materials(src_gltf, b, used_mats)
+        primitives: List[Primitive] = []
+        uv_acc: Dict[int, int] = {}
+        for (prim, cnt, off, icnt, ioff) in chunks:
+            sl = slice(off, off + cnt)
+            attrs = Attributes(
+                POSITION=b.add(positions[sl], "VEC3", FLOAT, ARRAY_BUFFER, minmax=True),
+                NORMAL=b.add(normals[sl], "VEC3", FLOAT, ARRAY_BUFFER),
+                JOINTS_0=b.add(np.ascontiguousarray(joints_u16[sl], dtype=np.uint16),
+                               "VEC4", UNSIGNED_SHORT, ARRAY_BUFFER),
+                WEIGHTS_0=b.add(np.ascontiguousarray(weights_f32[sl], dtype=np.float32),
+                                "VEC4", FLOAT, ARRAY_BUFFER))
+            if prim.attributes.TEXCOORD_0 is not None:
+                key = prim.attributes.TEXCOORD_0
+                if key not in uv_acc:
+                    uv = glb_io.read_accessor(src_gltf, key).astype(np.float32)
+                    uv_acc[key] = b.add(np.ascontiguousarray(uv), "VEC2", FLOAT,
+                                        ARRAY_BUFFER)
+                attrs.TEXCOORD_0 = uv_acc[key]
+            ci = indices[ioff:ioff + icnt] - off
+            u16 = cnt < 65536
+            primitives.append(Primitive(
+                attributes=attrs,
+                indices=b.add(np.ascontiguousarray(
+                    ci.astype(np.uint16 if u16 else np.uint32)),
+                    "SCALAR", UNSIGNED_SHORT if u16 else UNSIGNED_INT,
+                    ELEMENT_ARRAY_BUFFER),
+                material=mat_remap.get(prim.material, 0)))
+    else:
+        materials_out = [Material(
+            name="mat", doubleSided=True,
+            pbrMetallicRoughness=PbrMetallicRoughness(
+                baseColorFactor=[0.82, 0.84, 0.88, 1.0], metallicFactor=0.0,
+                roughnessFactor=0.75))]
+        textures_out, samplers_out, images_out = [], [], []
+        primitives = [Primitive(
+            attributes=Attributes(POSITION=acc_pos, NORMAL=acc_nor,
+                                  JOINTS_0=acc_joints, WEIGHTS_0=acc_weights),
+            indices=acc_idx, material=0)]
 
     gltf = GLTF2(
         asset=Asset(version="2.0", generator="ai3d.retarget"),
         scene=0,
         scenes=[Scene(name="Scene", nodes=[0, mesh_node_idx])],
         nodes=nodes,
-        meshes=[Mesh(name="target", primitives=[Primitive(
-            attributes=Attributes(POSITION=acc_pos, NORMAL=acc_nor,
-                                  JOINTS_0=acc_joints, WEIGHTS_0=acc_weights),
-            indices=acc_idx, material=0)])],
-        materials=[material],
+        meshes=[Mesh(name="target", primitives=primitives)],
+        materials=materials_out,
+        textures=textures_out,
+        samplers=samplers_out,
+        images=images_out,
         skins=[Skin(name="rig", inverseBindMatrices=acc_ibm,
                     skeleton=JOINT_INDEX["pelvis"], joints=list(range(nj)))],
         animations=[Animation(name=anim_name, samplers=samplers, channels=channels)],

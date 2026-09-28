@@ -88,6 +88,7 @@ class SkinConfig:
     diffusion_iters: int = 8           # Laplacian 扩散迭代次数
     diffusion_lambda: float = 0.5      # 扩散步长
     max_influences: int = 4            # 每顶点最大骨骼影响数
+    rigid_island_share: float = 0.6    # 连通岛聚合权重主骨占比≥该值时整岛 one-hot 刚性蒙皮
 
 
 @dataclass

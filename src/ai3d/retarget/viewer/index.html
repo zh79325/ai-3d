@@ -156,7 +156,7 @@
       <div class="card" id="reviewCard" style="display:none">
         <label>⚠️ 人工审核（EXPORT_VERIFY 门控）</label>
         <div id="reviewReasons" class="muted" style="font-size:12px"></div>
-        <div class="muted" style="font-size:12px;margin-top:4px">目视审核：主画布切「合并/骨骼」看骨骼是否套在模型内；下方「🎬 预览结果动画」可播放迁移结果</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">目视审核：主画布切「合并/骨骼」看骨骼是否套在模型内；右上「🎬 迁移动画」可播放迁移结果</div>
         <div class="row" style="margin-top:6px">
           <button id="btnForceExport">✅ 通过并导出</button>
           <button id="btnResolve" class="ghost">🔁 重跑求解</button>
@@ -169,9 +169,6 @@
       <div class="card">
         <div id="taskInfo"></div>
         <div id="downloads"></div>
-        <div class="row" style="margin-top:6px">
-          <button id="btnPreviewResult" class="ghost" style="display:none">🎬 预览结果动画</button>
-        </div>
       </div>
 
       <h2 style="margin:14px 0 8px">日志</h2>
@@ -189,7 +186,7 @@
       <button data-mode="mesh" class="ghost">模型</button>
       <button data-mode="bone" class="ghost">骨骼</button>
       <button data-mode="both" class="ghost">合并</button>
-      <button id="btnCmp" class="ghost">对比源骨骼</button>
+      <button id="btnViewResult" class="ghost" style="display:none">🎬 迁移动画</button>
     </div>
     <div id="animBar">
       <button id="btnPlay" class="ghost">⏸ 暂停</button>
@@ -230,10 +227,8 @@ let rigGroup = null, rigTaskId = null, viewMode = 'both';
 // 迷你窗状态必须在 animate() 首次调用前声明（let 有 TDZ，后置会令整个 module 报错中断）
 let miniRenderer = null, miniScene = null, miniCam = null, miniControls = null;
 let miniMixer = null, miniModel = null, miniTaskId = null, miniHelper = null;
-// 源骨骼并排对比（主画布右侧）
-let cmpGroup = null, cmpMixer = null, cmpHelper = null, cmpOn = false;
 // 审核对比视图：三联纵深纵队 ①源+骨骼 ②源纯骨骼 ③绑定骨骼+目标
-let rvOn = false, rvParts = [], curRig = null, rvCmpWasOn = false;
+let rvOn = false, rvParts = [], curRig = null;
 const modelOffset = new THREE.Vector3();
 const clock = new THREE.Clock();
 
@@ -251,9 +246,7 @@ function animate() {
   const dt = clock.getDelta();
   if (mixer) mixer.update(dt);
   if (miniMixer) miniMixer.update(dt);
-  if (cmpMixer) cmpMixer.update(dt);
   if (miniHelper) updateBoneLines(miniHelper);
-  if (cmpHelper) updateBoneLines(cmpHelper);
   controls.update();
   renderer.render(scene, camera);
   if (miniRenderer && document.getElementById('miniPanel').style.display !== 'none') {
@@ -454,51 +447,7 @@ function ghostObject(obj, ghost, opacity) {
 document.querySelectorAll('#viewBar button').forEach(b => {
   b.onclick = () => { viewMode = b.dataset.mode; applyViewMode(); };
 });
-document.getElementById('btnCmp').onclick = () => toggleCompare();
 document.getElementById('btnReviewView').onclick = () => { rvOn ? exitReview() : enterReview(); };
-
-// 源骨骼并排对比：源模型+过滤 IK/twist 的自绘骨骼线 归一化同身高后摆到主画布右侧同屏播放
-function clearCompare() {
-  if (cmpHelper) { scene.remove(cmpHelper); cmpHelper = null; }
-  if (cmpGroup) { scene.remove(cmpGroup); cmpGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
-  cmpGroup = null; cmpMixer = null;
-}
-async function toggleCompare() {
-  const btn = document.getElementById('btnCmp');
-  if (cmpOn) {
-    cmpOn = false; clearCompare(); btn.classList.remove('on');
-    return;
-  }
-  if (!currentTaskId) return;
-  try {
-    const gltf = await new Promise((res, rej) =>
-      loader.load(`/v1/jobs/${currentTaskId}/source.glb`, res, undefined, rej));
-    clearCompare();
-    cmpGroup = gltf.scene; scene.add(cmpGroup);
-    cmpGroup.updateMatrixWorld(true);
-    // 同身高归一化 + 摆到右侧 + 脚底贴地，与目标骨骼同坐标系可比
-    const tgtH = curModel ? new THREE.Box3().setFromObject(curModel).getSize(new THREE.Vector3()).y : 1;
-    const bb = new THREE.Box3().setFromObject(cmpGroup);
-    const s = bb.getSize(new THREE.Vector3());
-    cmpGroup.scale.setScalar(tgtH / (s.y || 1));
-    cmpGroup.updateMatrixWorld(true);
-    const bb2 = new THREE.Box3().setFromObject(cmpGroup);
-    const c2 = bb2.getCenter(new THREE.Vector3());
-    cmpGroup.position.x += tgtH * 1.1 - c2.x;
-    cmpGroup.position.z -= c2.z;
-    cmpGroup.position.y -= bb2.min.y;
-    cmpGroup.updateMatrixWorld(true);
-    cmpHelper = buildBoneLines(cmpGroup, 0x39d98a);
-    cmpHelper.renderOrder = 998;
-    scene.add(cmpHelper);
-    if (gltf.animations && gltf.animations.length) {
-      cmpMixer = new THREE.AnimationMixer(cmpGroup);
-      cmpMixer.clipAction(gltf.animations[0]).play();
-    }
-    cmpOn = true; btn.classList.add('on');
-    log('源骨骼并排对比已开启（右侧）🦴⇄🦴');
-  } catch (e) { log('对比加载失败：' + e.message); }
-}
 // 语义关节父子表（与后端 skeleton.py PARENTS 一致），用于把源骨骼重画成语义拓扑
 const SEM_PARENTS = {
   pelvis: null, spine_01: 'pelvis', spine_02: 'spine_01', chest: 'spine_02',
@@ -609,9 +558,6 @@ async function enterReview() {
       loader.load(`/v1/jobs/${currentTaskId}/source.glb`, res, undefined, rej));
     const gA = await loadSrc();
     exitReview();
-    rvCmpWasOn = !!(cmpGroup && cmpGroup.visible);
-    if (cmpGroup) cmpGroup.visible = false;
-    if (cmpHelper) cmpHelper.visible = false;
     const rigHeads = {};
     for (const [j, jd] of Object.entries((curRig && curRig.joints) || {})) rigHeads[j] = jd.head;
     const tys = Object.values(rigHeads).map(a => a[1]);
@@ -696,8 +642,6 @@ function exitReview() {
   });
   rvParts = [];
   rvOn = false;
-  if (cmpGroup) cmpGroup.visible = rvCmpWasOn;
-  if (cmpHelper) cmpHelper.visible = rvCmpWasOn;
   document.getElementById('btnReviewView').classList.remove('on');
   applyViewMode();  // 恢复主画布模型/骨骼可见性与幽灵状态
 }
@@ -748,9 +692,9 @@ function renderTaskInfo(info) {
   if (kinds.includes('source')) html += `<a class="dl" href="/v1/jobs/${info.task_id}/source.glb" download>⬇ source.glb</a>`;
   if (kinds.includes('result')) html += `<a class="dl" href="/v1/jobs/${info.task_id}/result.glb" download>⬇ result.glb</a>`;
   dl.innerHTML = html;
-  // 结果产物存在（含 NEEDS_REVIEW 审核态）即提供结果动画预览入口
-  document.getElementById('btnPreviewResult').style.display =
-    kinds.includes('result') ? 'inline-block' : 'none';
+  // 迁移产出结果后在右上 viewBar 统一入口显示「🎬 迁移动画」按钮
+  document.getElementById('btnViewResult').style.display =
+    kinds.includes('result') ? '' : 'none';
   document.getElementById('ovStatus').innerHTML =
     `任务 <b>${info.task_id}</b> · <span class="badge b-${info.state}">${info.state}</span>` +
     (info.current_stage ? ` · ${info.current_stage}` : '');
@@ -783,7 +727,6 @@ function refreshUploadState(info) {
   if (hasSource) document.getElementById('srcName').textContent = '已上传：' + (info.source_filename || '');
   document.getElementById('btnDetect').disabled = !hasTarget;
   document.getElementById('btnMigrate').disabled = !(hasSource && rigDone);
-  document.getElementById('btnCmp').disabled = !hasSource;
   // 源动画就绪 → 右上角小窗自动预览
   if (hasSource && miniTaskId !== info.task_id) {
     loadMiniPreview(`/v1/jobs/${info.task_id}/source.glb`, info.task_id);
@@ -848,14 +791,14 @@ async function pollOnce() {
 
   if (info.state === 'DONE') {
     stopPoll();
-    if (kinds.includes('result')) {
-      clearModel();
-      loadPreview(`/v1/jobs/${currentTaskId}/result.glb`, { play: true }).catch(() => {});
-    }
-    log('任务完成 ✅'); return;
+    log('任务完成 ✅ 点右上「🎬 迁移动画」查看迁移结果'); return;
   }
   if (info.state === 'FAILED') { stopPoll(); log('任务失败：' + (info.error || '')); return; }
-  if (info.state === 'NEEDS_REVIEW') { stopPoll(); log('需人工审核：' + (info.review_reasons||[]).join('; ')); return; }
+  if (info.state === 'NEEDS_REVIEW') {
+    stopPoll();
+    log('需人工审核：' + (info.review_reasons || []).join('; ')
+        + '；点右上「🎬 迁移动画」查看迁移结果'); return;
+  }
 
   if (info.state === 'WAITING' && info.current_stage === 'RENDER_VIEWS' && !viewsDone && !viewsBusy) {
     renderAndUploadViews(info.task_id); return;
@@ -872,8 +815,6 @@ function startPoll() { stopPoll(); pollOnce(); pollTimer = setInterval(pollOnce,
 async function openTask(taskId) {
   currentTaskId = taskId; viewsDone = false; viewsBusy = false;
   setUrlTask(taskId);
-  cmpOn = false; clearCompare();
-  document.getElementById('btnCmp').classList.remove('on');
   exitReview();
   document.getElementById('viewList').style.display = 'none';
   document.getElementById('viewDetail').style.display = 'block';
@@ -884,8 +825,6 @@ async function openTask(taskId) {
 function backToList() {
   stopPoll(); currentTaskId = null;
   setUrlTask(null);
-  cmpOn = false; clearCompare();
-  document.getElementById('btnCmp').classList.remove('on');
   exitReview();
   clearMini();
   document.getElementById('miniPanel').style.display = 'none';
@@ -1050,8 +989,8 @@ document.getElementById('btnResolve').onclick = async () => {
     startPoll();
   } catch (e) { log('重跑失败：' + e.message); }
 };
-// 结果动画预览：审核态轮询已停、主画布停在静态目标模型，需手动入口加载 result.glb
-document.getElementById('btnPreviewResult').onclick = () => {
+// 结果动画预览：迁移产出 result 后 viewBar 显示「🎬 迁移动画」按钮，点击加载播放
+function previewResultAnim() {
   if (!currentTaskId) return;
   if (rvOn) exitReview();
   // 结果网格自带蒙皮动画：静态 rest rig 叠层会随播放错位，切纯模型视图
@@ -1059,7 +998,8 @@ document.getElementById('btnPreviewResult').onclick = () => {
   loadPreview(`/v1/jobs/${currentTaskId}/result.glb`, { play: true })
     .then(() => log('结果动画预览中：底部播放条可暂停/拖进度，右上小窗为源动画对照'))
     .catch(e => log('结果预览失败：' + e.message));
-};
+}
+document.getElementById('btnViewResult').onclick = previewResultAnim;
 document.getElementById('btnRetargetReupload').onclick = () => {
   document.getElementById('tgtPick').style.display = 'block';
   document.getElementById('tgtDone').style.display = 'none';

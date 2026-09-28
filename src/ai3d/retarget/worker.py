@@ -87,15 +87,18 @@ class Worker:
                 self.store.set_stage(task_id, stage, StageStatus.SKIPPED,
                                      "确定性路径跳过（未启用姿态 AI）")
                 continue
+            gate_reasons = None
             if stage == Stage.EXPORT_VERIFY:
                 gate = self._gate(task_id, force=force)
                 if gate is not None:
-                    reasons, _blocking = gate
-                    self.store.update_task(task_id, state=JobState.NEEDS_REVIEW,
-                                           review_reasons=reasons)
-                    self.store.set_stage(task_id, stage, StageStatus.WAITING,
-                                         "门控审核：" + "；".join(reasons))
-                    return
+                    reasons, blocking = gate
+                    if blocking:
+                        self.store.update_task(task_id, state=JobState.NEEDS_REVIEW,
+                                               review_reasons=reasons)
+                        self.store.set_stage(task_id, stage, StageStatus.WAITING,
+                                             "门控阻断导出：" + "；".join(reasons))
+                        return
+                    gate_reasons = reasons
             self.store.set_stage(task_id, stage, StageStatus.RUNNING)
             try:
                 result = self._handlers[stage](task_id)
@@ -106,6 +109,12 @@ class Worker:
                 return
             if result == StepResult.CONTINUE:
                 self.store.set_stage(task_id, stage, StageStatus.DONE)
+                if gate_reasons is not None:
+                    # 非阻断审核：EXPORT_VERIFY 已产出 result.glb（审核期「🎬 迁移动画」
+                    # 预览用），挂起等待人工处置，不自动置 DONE
+                    self.store.update_task(task_id, state=JobState.NEEDS_REVIEW,
+                                           review_reasons=gate_reasons)
+                    return
                 continue
             if result == StepResult.WAIT:
                 self.store.set_stage(task_id, stage, StageStatus.WAITING,
@@ -409,7 +418,8 @@ class Worker:
         result_glb = s.path_for(task_id, ArtifactKind.RESULT)
         build_result_glb(
             mesh, rig.heads, skin_np["joints"], skin_np["weights"],
-            anim_np["times"], rotations, anim_np["root_translations"], result_glb)
+            anim_np["times"], rotations, anim_np["root_translations"], result_glb,
+            src_gltf=g)
         summary = glb_io.read_summary(result_glb)
         problems = []
         if summary["meshes"] < 1:
