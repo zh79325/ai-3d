@@ -1,0 +1,69 @@
+# FBX/GLB 骨骼动画迁移工具 —— 后端集中配置
+#
+# 加载优先级：内置默认(dataclass) < 本文件 < 环境变量(RETARGET_*)
+# 所有相对路径按项目根解析（项目根 = ai3d 仓库根，即 src 的上一级）。
+# 可用环境变量覆盖：RETARGET_CONFIG / RETARGET_SERVER_HOST / RETARGET_SERVER_PORT
+#                    / RETARGET_DB_PATH / RETARGET_PROJECT_DIR / RETARGET_ASSIMP_PATH
+
+server:
+  host: "127.0.0.1"
+  port: 8790                 # 避开现有 viewer 的 8765/8766
+  cors_origins: ["*"]
+
+database:
+  # 仅 SQLite；相对路径按项目根解析 → <项目根>/output/data/retarget.db
+  sqlite_path: "output/data/retarget.db"
+
+paths:
+  # 所有上传内容与产物的根目录；相对路径按项目根解析 → <项目根>/output
+  project_dir: "output"
+  # 派生（无需配置）：
+  #   upload_dir = <project_dir>/uploads
+  #   data_dir   = <project_dir>/data
+  #   tasks_dir  = <project_dir>/tasks
+  #   task_dir   = <project_dir>/tasks/<task_id>
+
+assimp:
+  # assimp CLI 名称或绝对路径；仅当输入为 FBX 时需要（brew install assimp）
+  path: "assimp"
+
+# 质量门控阈值
+gating:
+  auto_pass: 0.80            # >= 自动通过
+  review_min: 0.55           # [review_min, auto_pass) 需人工审核
+  core_joint_min: 0.50       # 核心关节(髋膝肩肘) 低于此值强制审核
+
+# 三维关节求解
+solve:
+  min_confidence: 0.30
+  symmetry_weight: 0.5
+  proportion_weight: 0.3
+  bone_length_stability: 0.5
+
+# 自动蒙皮
+skin:
+  capsule_radius_scale: 0.5
+  diffusion_iters: 8
+  diffusion_lambda: 0.5
+  max_influences: 4
+
+# 源骨映射
+mapping:
+  name_weight: 1.0
+  hierarchy_weight: 0.6
+  geometry_weight: 0.8
+  motion_weight: 0.4
+  min_match_score: 0.35
+
+# 重定向
+retarget:
+  bake_fps: 0                # 0 = 沿用源动画 fps
+  root_scale_by_height: true
+  foot_lock: true
+  spine_distribute_by_length: true
+
+# 模型（可选覆盖；默认复用 ai3d.config.ModelConfig，离线本地加载）
+# model:
+#   dwpose_det_model: "./models/dwpose-det-yolox-m-640x640.onnx"
+#   dwpose_pose_model: "./models/dwpose-pose-rtmw-x-l-192x256.onnx"
+#   pose_model: "./models/yolo26n-pose.pt"

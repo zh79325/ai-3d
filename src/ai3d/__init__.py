@@ -29,10 +29,12 @@ def launch_viewer(video_path: Optional[str] = None, port: int = 8765):
     # 直接导入并运行,避免 subprocess + argparse 的参数传递问题
     from scripts.launch_viewer import launch_standalone
     
-    print(f"🚀 启动预览服务器...")
+    print(f"🚀 启动服务器...")
     if video_path:
         print(f"   预处理视频: {video_path}")
     print(f"   端口: {port}")
-    print(f"   浏览器访问: http://localhost:{port}/api/skeleton-viewer/viewer\n")
+    print(f"   功能菜单: http://localhost:{port}/")
+    print(f"   🎬 骨骼查看器:   http://localhost:{port}/api/skeleton-viewer/viewer")
+    print(f"   🦴 动画迁移工具: http://localhost:{port}/retarget\n")
     
     launch_standalone(video_path, port)

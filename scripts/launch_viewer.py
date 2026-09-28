@@ -232,8 +232,10 @@ def launch_standalone(video_path: str = None, port: int = 8765):
     import threading
     from ai3d.viewer import create_app
     
-    print(f"\n🚀 启动预览服务器...")
-    print(f"   访问地址: http://localhost:{port}/api/skeleton-viewer/viewer")
+    print(f"\n🚀 启动服务...")
+    print(f"   功能菜单: http://localhost:{port}/")
+    print(f"   🎬 骨骼查看器:   http://localhost:{port}/api/skeleton-viewer/viewer")
+    print(f"   🦴 动画迁移工具: http://localhost:{port}/retarget")
     print(f"   按 Ctrl+C 停止服务器\n")
     
     # 1. 先创建并启动FastAPI应用
