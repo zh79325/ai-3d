@@ -221,8 +221,8 @@ let miniRenderer = null, miniScene = null, miniCam = null, miniControls = null;
 let miniMixer = null, miniModel = null, miniTaskId = null, miniHelper = null;
 // 源骨骼并排对比（主画布右侧）
 let cmpGroup = null, cmpMixer = null, cmpHelper = null, cmpOn = false;
-// 审核对比视图：四联一排 ①源+骨骼 ②源纯骨骼 ③绑定骨骼 ④绑定骨骼+目标
-let rvOn = false, rvParts = [], curRig = null;
+// 审核对比视图：三联纵深纵队 ①源+骨骼 ②源纯骨骼 ③绑定骨骼+目标
+let rvOn = false, rvParts = [], curRig = null, rvCmpWasOn = false;
 const modelOffset = new THREE.Vector3();
 const clock = new THREE.Clock();
 
@@ -241,6 +241,8 @@ function animate() {
   if (mixer) mixer.update(dt);
   if (miniMixer) miniMixer.update(dt);
   if (cmpMixer) cmpMixer.update(dt);
+  if (miniHelper) updateBoneLines(miniHelper);
+  if (cmpHelper) updateBoneLines(cmpHelper);
   controls.update();
   renderer.render(scene, camera);
   if (miniRenderer && document.getElementById('miniPanel').style.display !== 'none') {
@@ -346,8 +348,8 @@ function loadMiniPreview(url, taskId) {
       miniMixer.clipAction(gltf.animations[0]).play();
     }
     // 小窗也叠上源骨骼线，便于与主画布绑定骨骼对照
-    miniHelper = new THREE.SkeletonHelper(miniModel);
-    miniHelper.material.depthTest = false; miniHelper.renderOrder = 999;
+    miniHelper = buildBoneLines(miniModel, 0x39d98a);
+    miniHelper.renderOrder = 999;
     miniScene.add(miniHelper);
     miniTaskId = taskId;
     document.getElementById('miniPanel').style.display = 'block';
@@ -406,10 +408,10 @@ function syncViewBar() {
 function applyViewMode() {
   if (curModel) {
     // 骨骼模式：完全隐藏模型；合并模式：模型半透明幽灵化，便于看骨骼是否套在模型中间
-    curModel.visible = (viewMode !== 'bone');
-    setMeshGhost(viewMode === 'both' && !!rigGroup);
+    curModel.visible = rvOn ? false : (viewMode !== 'bone');
+    if (!rvOn) setMeshGhost(viewMode === 'both' && !!rigGroup);
   }
-  if (rigGroup) rigGroup.visible = (viewMode !== 'mesh');
+  if (rigGroup) rigGroup.visible = rvOn ? false : (viewMode !== 'mesh');
   syncViewBar();
 }
 function setMeshGhost(ghost) {
@@ -438,7 +440,7 @@ document.querySelectorAll('#viewBar button').forEach(b => {
 document.getElementById('btnCmp').onclick = () => toggleCompare();
 document.getElementById('btnReviewView').onclick = () => { rvOn ? exitReview() : enterReview(); };
 
-// 源骨骼并排对比：源模型+SkeletonHelper 归一化同身高后摆到主画布右侧同屏播放
+// 源骨骼并排对比：源模型+过滤 IK/twist 的自绘骨骼线 归一化同身高后摆到主画布右侧同屏播放
 function clearCompare() {
   if (cmpHelper) { scene.remove(cmpHelper); cmpHelper = null; }
   if (cmpGroup) { scene.remove(cmpGroup); cmpGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
@@ -469,8 +471,8 @@ async function toggleCompare() {
     cmpGroup.position.z -= c2.z;
     cmpGroup.position.y -= bb2.min.y;
     cmpGroup.updateMatrixWorld(true);
-    cmpHelper = new THREE.SkeletonHelper(cmpGroup);
-    cmpHelper.material.depthTest = false; cmpHelper.renderOrder = 998;
+    cmpHelper = buildBoneLines(cmpGroup, 0x39d98a);
+    cmpHelper.renderOrder = 998;
     scene.add(cmpHelper);
     if (gltf.animations && gltf.animations.length) {
       cmpMixer = new THREE.AnimationMixer(cmpGroup);
@@ -490,6 +492,33 @@ const SEM_PARENTS = {
   upper_leg_r: 'pelvis', lower_leg_r: 'upper_leg_r', foot_r: 'lower_leg_r', toe_r: 'foot_r',
 };
 function boneWorldPos(b) { const w = new THREE.Vector3(); b.getWorldPosition(w); return w; }
+// 自绘骨骼线：跳过 ik_/twist 等辅助骨（SkeletonHelper 会把 ik_foot_root→脚、ik_hand_gun→手 画成怪线）
+function isHelperBone(o) { return /ik_|twist|socket|virtual|dummy/i.test(o.name || ''); }
+function buildBoneLines(root, color) {
+  const bones = [];
+  root.traverse(o => { if (o.isBone && !isHelperBone(o)) bones.push(o); });
+  const pairs = [];
+  bones.forEach(b => { if (b.parent && b.parent.isBone && !isHelperBone(b.parent)) pairs.push([b, b.parent]); });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pairs.length * 6), 3));
+  const ls = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+    color: color || 0x39d98a, depthTest: false, depthWrite: false }));
+  ls.userData.pairs = pairs;
+  updateBoneLines(ls);
+  return ls;
+}
+function updateBoneLines(ls) {
+  const pairs = ls.userData.pairs;
+  if (!pairs || !pairs.length) return;
+  const attr = ls.geometry.getAttribute('position');
+  const a = new THREE.Vector3();
+  for (let i = 0; i < pairs.length; i++) {
+    pairs[i][0].getWorldPosition(a); attr.array[i * 6] = a.x; attr.array[i * 6 + 1] = a.y; attr.array[i * 6 + 2] = a.z;
+    pairs[i][1].getWorldPosition(a); attr.array[i * 6 + 3] = a.x; attr.array[i * 6 + 4] = a.y; attr.array[i * 6 + 5] = a.z;
+  }
+  attr.needsUpdate = true;
+  ls.geometry.computeBoundingSphere();
+}
 function semanticBones(root, mapping) {
   const bones = [];
   root.traverse(o => { if (o.isBone) bones.push(o); });
@@ -578,15 +607,18 @@ async function enterReview() {
       loader.load(`/v1/jobs/${currentTaskId}/source.glb`, res, undefined, rej));
     const [gA, gB] = await Promise.all([loadSrc(), loadSrc()]);
     exitReview();
+    rvCmpWasOn = !!(cmpGroup && cmpGroup.visible);
+    if (cmpGroup) cmpGroup.visible = false;
+    if (cmpHelper) cmpHelper.visible = false;
     const rigHeads = {};
     for (const [j, jd] of Object.entries((curRig && curRig.joints) || {})) rigHeads[j] = jd.head;
     const tys = Object.values(rigHeads).map(a => a[1]);
     const tgtH = (Math.max(...tys) - Math.min(...tys)) || 1;
-    // 四列布局（列组旋转使目标局部 forward=+X 面向相机）
-    const cols = [-1.5, -0.5, 0.5, 1.5].map(k => {
+    // 三联纵深纵队（沿世界 Z 前后站排；列组旋转使模型正面朝向侧方相机）
+    const cols = [1, 0, -1].map(k => {
       const g = new THREE.Group();
-      g.rotation.y = -Math.PI / 2;
-      g.position.x = k * tgtH * 0.95;
+      g.rotation.y = Math.PI / 2;
+      g.position.z = k * tgtH * 1.1;
       scene.add(g); rvParts.push(g);
       return g;
     });
@@ -596,9 +628,8 @@ async function enterReview() {
     centerLocal(srcA, boneA, tgtH);
     ghostObject(srcA, true);
     cols[0].add(srcA);
-    const helperA = new THREE.SkeletonHelper(srcA);
-    helperA.material.depthTest = false; helperA.renderOrder = 997;
-    srcA.add(helperA); rvParts.push(helperA);
+    const helperA = buildBoneLines(srcA, 0x39d98a);
+    scene.add(helperA); rvParts.push(helperA);
     // ② 源剥离纯骨骼（摆成目标 rest pose，无网格）
     const srcB = gB.scene; scene.add(srcB); rvParts.push(srcB);
     const boneB = semanticBones(srcB, mapping);
@@ -606,29 +637,24 @@ async function enterReview() {
     centerLocal(srcB, boneB, tgtH);
     srcB.traverse(o => { if (o.isMesh) o.visible = false; });  // 只隐网格，保留骨骼节点
     cols[1].add(srcB);
-    const helperB = new THREE.SkeletonHelper(srcB);
-    helperB.material.depthTest = false; helperB.renderOrder = 997;
-    srcB.add(helperB); rvParts.push(helperB);
-    // ③ 新绑定骨骼（无模型）
-    const rigC = buildRig(curRig); cols[2].add(rigC); rvParts.push(rigC);
-    centerRigGroup(rigC, rigHeads);
-    // ④ 新绑定骨骼 + 目标模型（幽灵）
-    const rigD = buildRig(curRig); cols[3].add(rigD); rvParts.push(rigD);
+    const helperB = buildBoneLines(srcB, 0x39d98a);
+    scene.add(helperB); rvParts.push(helperB);
+    // ③ 新绑定骨骼 + 目标模型（幽灵）
+    const rigD = buildRig(curRig); cols[2].add(rigD); rvParts.push(rigD);
     centerRigGroup(rigD, rigHeads);
     if (curModel) {
-      const meshD = cloneGhosted(curModel); cols[3].add(meshD); rvParts.push(meshD);
+      const meshD = cloneGhosted(curModel); cols[2].add(meshD); rvParts.push(meshD);
       meshD.position.copy(rigD.position);
     }
     scene.updateMatrixWorld(true);
-    // 对应骨骼点连线：①-②-③-④ 同一语义关节串起来
+    // 对应骨骼点连线：①-②-③ 同一语义关节串起来
     const pts = [];
     for (const j of Object.keys(SEM_PARENTS)) {
       const p1 = boneA[j] ? boneWorldPos(boneA[j]) : null;
       const p2 = boneB[j] ? boneWorldPos(boneB[j]) : null;
       const h = rigHeads[j];
-      const p3 = h ? rigC.localToWorld(new THREE.Vector3(...h)) : null;
-      const p4 = h ? rigD.localToWorld(new THREE.Vector3(...h)) : null;
-      const chain = [p1, p2, p3, p4].filter(Boolean);
+      const p3 = h ? rigD.localToWorld(new THREE.Vector3(...h)) : null;
+      const chain = [p1, p2, p3].filter(Boolean);
       for (let i = 0; i + 1 < chain.length; i++) pts.push(chain[i].clone(), chain[i + 1].clone());
     }
     if (pts.length) {
@@ -637,22 +663,22 @@ async function enterReview() {
       const ls = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lm);
       ls.renderOrder = 996; scene.add(ls); rvParts.push(ls);
     }
-    // 主画布原模型/骨骼隐藏，避免与四列重叠
+    // 主画布原模型/骨骼隐藏，避免与纵队重叠
     if (curModel) curModel.visible = false;
     if (rigGroup) rigGroup.visible = false;
-    // 相机框住四列
+    // 相机摆到侧前方：纵队在屏幕上等宽并排，白线水平连接同名关节
     const box = new THREE.Box3();
     pts.forEach(p => box.expandByPoint(p));
     if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(0, tgtH / 2, 0),
-      new THREE.Vector3(tgtH * 4, tgtH, tgtH));
+      new THREE.Vector3(tgtH, tgtH, tgtH * 3));
     const c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
     controls.target.copy(c);
-    camera.position.copy(c).add(new THREE.Vector3(0, maxDim * 0.25, maxDim * 1.35));
+    camera.position.copy(c).add(new THREE.Vector3(maxDim * 1.35, maxDim * 0.25, maxDim * 0.5));
     controls.update();
     rvOn = true;
     document.getElementById('btnReviewView').classList.add('on');
-    log('审核四联视图：①源+骨骼 ②源纯骨骼 ③绑定骨骼 ④绑定骨骼+目标；白线=对应关节');
+    log('审核纵队：①源+骨骼 ②源纯骨骼 ③绑定骨骼+目标；白线=对应关节（绕到正面可叠影对比）');
   } catch (e) { log('审核视图加载失败：' + e.message); }
 }
 function exitReview() {
@@ -668,6 +694,8 @@ function exitReview() {
   });
   rvParts = [];
   rvOn = false;
+  if (cmpGroup) cmpGroup.visible = rvCmpWasOn;
+  if (cmpHelper) cmpHelper.visible = rvCmpWasOn;
   document.getElementById('btnReviewView').classList.remove('on');
   applyViewMode();  // 恢复主画布模型/骨骼可见性与幽灵状态
 }

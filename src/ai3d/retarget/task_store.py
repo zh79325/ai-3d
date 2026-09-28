@@ -67,7 +67,8 @@ class TaskStore:
     # 路径
     # ------------------------------------------------------------------ #
     def upload_dir(self, task_id: str) -> Path:
-        return self.settings.upload_task_dir(task_id)
+        """上传的原始文件直接与任务产物放同一目录（tasks/<task_id>/）。"""
+        return self.task_dir(task_id)
 
     def task_dir(self, task_id: str) -> Path:
         return self.settings.task_dir(task_id)
@@ -328,7 +329,6 @@ class TaskStore:
         self.db.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
         if remove_files:
             shutil.rmtree(self.task_dir(task_id), ignore_errors=True)
-            shutil.rmtree(self.upload_dir(task_id), ignore_errors=True)
         return True
 
 

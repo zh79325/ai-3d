@@ -120,8 +120,8 @@ async def create_job(
     try:
         up = s.upload_dir(task_id)
         up.mkdir(parents=True, exist_ok=True)
-        src_raw = up / f"source{_safe_suffix(source_file.filename, '.glb')}"
-        tgt_raw = up / f"target{_safe_suffix(target_file.filename, '.glb')}"
+        src_raw = up / f"source_raw{_safe_suffix(source_file.filename, '.glb')}"
+        tgt_raw = up / f"target_raw{_safe_suffix(target_file.filename, '.glb')}"
         src_raw.write_bytes(await source_file.read())
         tgt_raw.write_bytes(await target_file.read())
         s.register_artifact(task_id, ArtifactKind.SOURCE_RAW, src_raw)
@@ -149,7 +149,7 @@ async def upload_target(task_id: str, file: UploadFile = File(...)) -> JSONRespo
     s = _store()
     up = s.upload_dir(task_id)
     up.mkdir(parents=True, exist_ok=True)
-    tgt_raw = up / f"target{_safe_suffix(file.filename, '.glb')}"
+    tgt_raw = up / f"target_raw{_safe_suffix(file.filename, '.glb')}"
     tgt_raw.write_bytes(await file.read())
     s.register_artifact(task_id, ArtifactKind.TARGET_RAW, tgt_raw)
     s.update_task(task_id, target_filename=file.filename or "target")
@@ -170,7 +170,7 @@ async def upload_source(task_id: str, file: UploadFile = File(...)) -> JSONRespo
     s = _store()
     up = s.upload_dir(task_id)
     up.mkdir(parents=True, exist_ok=True)
-    src_raw = up / f"source{_safe_suffix(file.filename, '.glb')}"
+    src_raw = up / f"source_raw{_safe_suffix(file.filename, '.glb')}"
     src_raw.write_bytes(await file.read())
     s.register_artifact(task_id, ArtifactKind.SOURCE_RAW, src_raw)
     s.update_task(task_id, source_filename=file.filename or "source")

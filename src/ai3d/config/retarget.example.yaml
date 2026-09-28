@@ -18,14 +18,17 @@ paths:
   # 所有上传内容与产物的根目录；相对路径按项目根解析 → <项目根>/output
   project_dir: "output"
   # 派生（无需配置）：
-  #   upload_dir = <project_dir>/uploads
   #   data_dir   = <project_dir>/data
   #   tasks_dir  = <project_dir>/tasks
-  #   task_dir   = <project_dir>/tasks/<task_id>
+  #   task_dir   = <project_dir>/tasks/<task_id>（上传的原始文件也放这里）
 
 assimp:
   # assimp CLI 名称或绝对路径；仅当输入为 FBX 时需要（brew install assimp）
   path: "assimp"
+
+# 坐标轴归一化：导入时把不同工具的轴系统一到规范系（+Y up / +Z forward / +X left）
+axis:
+  enabled: true
 
 # 质量门控阈值
 gating:

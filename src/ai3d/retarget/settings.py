@@ -62,6 +62,12 @@ class AssimpConfig:
 
 
 @dataclass
+class AxisConfig:
+    # 导入时自动把模型轴系归一到规范系（+Y up / +Z forward / +X left）
+    enabled: bool = True
+
+
+@dataclass
 class GatingConfig:
     auto_pass: float = 0.80       # >= 自动通过
     review_min: float = 0.55      # [review_min, auto_pass) 需人工审核
@@ -112,6 +118,7 @@ class RetargetSettings:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     assimp: AssimpConfig = field(default_factory=AssimpConfig)
+    axis: AxisConfig = field(default_factory=AxisConfig)
     gating: GatingConfig = field(default_factory=GatingConfig)
     solve: SolveConfig = field(default_factory=SolveConfig)
     skin: SkinConfig = field(default_factory=SkinConfig)
@@ -130,10 +137,6 @@ class RetargetSettings:
         return _resolve(self.paths.project_dir)
 
     @property
-    def upload_dir(self) -> Path:
-        return self.project_dir / "uploads"
-
-    @property
     def data_dir(self) -> Path:
         return self.project_dir / "data"
 
@@ -148,12 +151,9 @@ class RetargetSettings:
     def task_dir(self, task_id: str) -> Path:
         return self.tasks_dir / task_id
 
-    def upload_task_dir(self, task_id: str) -> Path:
-        return self.upload_dir / task_id
-
     def ensure_dirs(self) -> None:
         """创建项目目录结构与数据库父目录。"""
-        for d in (self.project_dir, self.upload_dir, self.data_dir, self.tasks_dir,
+        for d in (self.project_dir, self.data_dir, self.tasks_dir,
                   self.sqlite_file.parent):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -183,6 +183,7 @@ class RetargetSettings:
         s.database = _merge_dc(s.database, raw.get("database"))
         s.paths = _merge_dc(s.paths, raw.get("paths"))
         s.assimp = _merge_dc(s.assimp, raw.get("assimp"))
+        s.axis = _merge_dc(s.axis, raw.get("axis"))
         s.gating = _merge_dc(s.gating, raw.get("gating"))
         s.solve = _merge_dc(s.solve, raw.get("solve"))
         s.skin = _merge_dc(s.skin, raw.get("skin"))
@@ -229,7 +230,6 @@ class RetargetSettings:
             "database": {"sqlite_file": str(self.sqlite_file)},
             "paths": {
                 "project_dir": str(self.project_dir),
-                "upload_dir": str(self.upload_dir),
                 "data_dir": str(self.data_dir),
                 "tasks_dir": str(self.tasks_dir),
             },

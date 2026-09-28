@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
@@ -101,19 +102,35 @@ def convert_fbx_to_glb(fbx_path: str | Path, glb_path: str | Path,
 
 def normalize_to_glb(src: str | Path, dst_glb: str | Path,
                      settings: Optional[RetargetSettings] = None) -> Path:
-    """把任意输入（FBX/GLB/glTF）归一化为单文件 GLB 写到 dst_glb。"""
+    """把任意输入（FBX/GLB/glTF）归一化为单文件 GLB 写到 dst_glb。
+
+    格式转换后统一做坐标轴归一（axis.enabled）：把不同工具的轴系旋到
+    规范系（+Y up / +Z forward / +X left），探测结果写 <stem>_axis_frame.json
+    侧车文件（与产物同目录，如 source_axis_frame.json）。
+    """
     src, dst_glb = Path(src), Path(dst_glb)
     kind = classify(src)
     dst_glb.parent.mkdir(parents=True, exist_ok=True)
     if kind == "fbx":
-        return convert_fbx_to_glb(src, dst_glb, settings)
-    if kind == "glb":
+        out = convert_fbx_to_glb(src, dst_glb, settings)
+    elif kind == "glb":
         if src.resolve() != dst_glb.resolve():
             shutil.copyfile(src, dst_glb)
-        return dst_glb
-    if kind == "gltf":
-        return convert_gltf_to_glb(src, dst_glb)
-    raise ConversionError(f"不支持的输入格式：{src.name}（仅支持 FBX / GLB / glTF）")
+        out = dst_glb
+    elif kind == "gltf":
+        out = convert_gltf_to_glb(src, dst_glb)
+    else:
+        raise ConversionError(f"不支持的输入格式：{src.name}（仅支持 FBX / GLB / glTF）")
+    settings = settings or get_settings()
+    if settings.axis.enabled:
+        from ai3d.retarget import axis_norm
+        info = axis_norm.normalize_axes_file(out)
+        try:
+            (Path(out).parent / f"{Path(out).stem}_axis_frame.json").write_text(
+                json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return out
 
 
 def convert_gltf_to_glb(gltf_path: str | Path, glb_path: str | Path) -> Path:
