@@ -312,7 +312,12 @@ def _serve_viewer() -> HTMLResponse:
     html = VIEWER_DIR / "index.html"
     if not html.exists():
         return JSONResponse(status_code=404, content={"error": "viewer/index.html 未找到"})
-    return HTMLResponse(html.read_text(encoding="utf-8"))
+    # 禁用缓存：前端 HTML 改动后刷新页面立即生效
+    return HTMLResponse(html.read_text(encoding="utf-8"), headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
 
 
 def create_app() -> FastAPI:

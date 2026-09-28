@@ -73,6 +73,15 @@ def _inject_nav(html: str, active: str) -> str:
     return html + snippet
 
 
+def _html_response(content: str) -> HTMLResponse:
+    """HTML 一律禁用缓存，保证前端文件改动后刷新页面立即生效。"""
+    return HTMLResponse(content=content, headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    })
+
+
 _MENU_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -230,7 +239,7 @@ async def get_viewer_page():
     with open(html_path, 'r', encoding='utf-8') as f:
         html_content = f.read()
     
-    return HTMLResponse(content=_inject_nav(html_content, "skeleton"))
+    return _html_response(_inject_nav(html_content, "skeleton"))
 
 
 @router.post("/load")
@@ -535,7 +544,7 @@ def _mount_retarget(app) -> bool:
             if not html_path.exists():
                 return JSONResponse(status_code=404,
                                     content={"error": "retarget viewer/index.html 未找到"})
-            return HTMLResponse(_inject_nav(html_path.read_text(encoding="utf-8"), "retarget"))
+            return _html_response(_inject_nav(html_path.read_text(encoding="utf-8"), "retarget"))
 
         return True
     except Exception as exc:  # noqa: BLE001 - 降级：retarget 不可用时仍提供骨骼查看器
@@ -576,7 +585,7 @@ def create_app() -> "FastAPI":
     # 根路径：功能切换菜单
     @app.get("/", include_in_schema=False)
     async def root():
-        return HTMLResponse(_render_menu(retarget_ok))
+        return _html_response(_render_menu(retarget_ok))
 
     return app
 
