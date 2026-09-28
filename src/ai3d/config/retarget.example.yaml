@@ -45,10 +45,11 @@ solve:
 
 # 自动蒙皮
 skin:
-  capsule_radius_scale: 0.5
-  diffusion_iters: 8
-  diffusion_lambda: 0.5
   max_influences: 4
+  weld_epsilon: 0.002
+  handle_margin: 0.25
+  max_handles: 3
+  bbw_max_verts: 30000
 
 # 源骨映射
 mapping:

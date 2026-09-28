@@ -21,6 +21,7 @@ name = "ai3d"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "libigl" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
@@ -74,6 +75,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0" },
     { name = "fastapi", marker = "extra == 'retarget'", specifier = ">=0.110.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=6.0" },
+    { name = "libigl", specifier = ">=2.5.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "onnxruntime", specifier = ">=1.15.0" },
     { name = "opencv-python", specifier = ">=4.8.0" },
@@ -1794,6 +1796,44 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/ce/a7dc71353dd06a4cbe02222773f52d4a28c81e5a452a75797f8ed113dc99/kiwisolver-1.5.1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5daa1f19e097050b9c4d9a78fcc9263cb96c9dfae08037ddc1b7c4ad1889f2a2", size = 79891, upload-time = "2026-08-28T10:28:22.936Z" },
     { url = "https://files.pythonhosted.org/packages/10/b1/d61c61a84ff85d1a36a99df2c152b59ffedb1d356c598902aba44abcdb60/kiwisolver-1.5.1-pp311-pypy311_pp73-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:cdaeeb6c350106df6bf9d873395973e5f066a9713200b72cd64f55d0a3eafab6", size = 77605, upload-time = "2026-08-28T10:28:24.322Z" },
     { url = "https://files.pythonhosted.org/packages/d3/52/5aef56f21a460a6e43ab3cdfc7697d59d7b87deb0ec97a0f7b91aa4a521b/kiwisolver-1.5.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:17851e5dad4484be0cbccbde3b15331deae036de9aebd45eed964487802b172f", size = 98465, upload-time = "2026-08-28T10:28:25.696Z" },
+]
+
+[[package]]
+name = "libigl"
+version = "2.6.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "scipy", version = "1.13.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/41/8b04eb112af0579790af6a04f7d0ffc9be6827ce44e99495d30c6820e1fc/libigl-2.6.3.tar.gz", hash = "sha256:e2a3ff17b88cae728cb60ea63850131315bb661045a8642db73aea98c91486ab", size = 41273089, upload-time = "2026-09-01T02:47:31.393Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/5b/87093034ff5a877c5bee033c890a63438bf3035e36f37111128d029973aa/libigl-2.6.3-cp310-cp310-macosx_10_15_x86_64.whl", hash = "sha256:0526d1ff21d06bbbcfe511333157f1c6d7bf9a11fa2e274c5e6dd5f870aee5c3", size = 13493468, upload-time = "2026-09-01T02:45:53.524Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/a9/55bde2920139c56e7842b338420e6d5b44027af212844c3090206b1d9059/libigl-2.6.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:56ba76ad2f4c59e08b5454b62181f6c41612d3fcc5085f667b24660342e7286e", size = 12226348, upload-time = "2026-09-01T02:46:06.346Z" },
+    { url = "https://files.pythonhosted.org/packages/03/7b/7e536b437ecfb0457135071dd269f1b739456b1d0e35426d907ef616e901/libigl-2.6.3-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:05ef5c35ea496352c08ab0274e889ca345fbb1e6720cede0416a86e6a59361ee", size = 13171231, upload-time = "2026-09-01T02:46:18.416Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/8b/b7301db9fbe233aeec747287b258a80ae13849aeb154bce5a77cec465ec7/libigl-2.6.3-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a27f0bb4b8b4d09b663c2b3ec7dfd40269f5f7be08ac5cdd56d8973caf20bbe3", size = 13899966, upload-time = "2026-09-01T02:46:34.772Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/7d/5d1418b42ee82c247ee899810d40ae109ae6dca8905f54b25c809a4a7cec/libigl-2.6.3-cp310-cp310-win_amd64.whl", hash = "sha256:40ad24757603620b5e34b91bb9fa2990c47868844868547f03cf600251c49018", size = 20252481, upload-time = "2026-09-01T02:47:00.284Z" },
+    { url = "https://files.pythonhosted.org/packages/45/ba/b3ef5c6fb173454a5775b414a42350778d21a10393013f5270813b01578b/libigl-2.6.3-cp311-cp311-macosx_10_15_x86_64.whl", hash = "sha256:f1150dfe0f9c63f9ce950e815151039087a383dcdd72561fbd991dcb9393597d", size = 13494116, upload-time = "2026-09-01T02:45:56.94Z" },
+    { url = "https://files.pythonhosted.org/packages/03/8b/78899c5d0fa288caa318a24ed54b2d21ea96de54ee1d1a6af3cac1ae9afc/libigl-2.6.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:a6bf9f64335620e7de396c3c58faef3232ec3a98d9788dd3018f1a94618b3180", size = 12226549, upload-time = "2026-09-01T02:46:09.102Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/1f/579f7f4eb51f00805a3a5d205f80ff32e40305393bd47187f177a1325299/libigl-2.6.3-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0ac1519eef2328553542788cf352a5c1143bb27cb7bbf240bb5674e61b0cac5b", size = 13171178, upload-time = "2026-09-01T02:46:21.52Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/cf/515db2791312df609ba7abb8d75cbe917a9e84a3f6fce416c64a526c5a9f/libigl-2.6.3-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e339d9b7c5ed1610971dfa1d5393a8cd1e244eec3809ef30e4063e32d3c0c9be", size = 13899658, upload-time = "2026-09-01T02:46:38.106Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/3b/16cd0b55355de72fa4fba737765eb1a51b3034acb032adeaad19b9146ee8/libigl-2.6.3-cp311-cp311-win_amd64.whl", hash = "sha256:65ac569fdc556a224c2d05ce265e0b0330c43c9787356dea5c6c26a92c6d6cd4", size = 20252199, upload-time = "2026-09-01T02:47:04.061Z" },
+    { url = "https://files.pythonhosted.org/packages/28/83/29c5a7a76d1f231ea75dc55369289393f96fd0dd30748bc2109c2454b403/libigl-2.6.3-cp312-abi3-macosx_10_15_x86_64.whl", hash = "sha256:913ae71a57e164ed79237c8c320677923b61fd762fdbaa1d3b2a974a198ba3a9", size = 13481939, upload-time = "2026-09-01T02:46:00.082Z" },
+    { url = "https://files.pythonhosted.org/packages/50/5a/687c38287c1ae298fc1221d8422f6fd63de9b9461dc8b0368e54953cc5ca/libigl-2.6.3-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:da3c62c50103be9b192bc76bbcb9e5031d80a2cf209b3ef0a0cf0060750088d9", size = 12215411, upload-time = "2026-09-01T02:46:11.991Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/88/d964fc9e6ee297793b8c65937f1bbe1365f3faaa29fc22054aa51a1e05a1/libigl-2.6.3-cp312-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:98952af1bc41e363a642c880465e91f951164a6ee23ca62e8e8449d00a31e2d0", size = 13158545, upload-time = "2026-09-01T02:46:25.196Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/c2/8641402402fbfa553c51615825434802de9c3b60b2580acdaad5312af396/libigl-2.6.3-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4a1d28aebfeb8b232a58943b1af318ec61a1fff7650a9d25a1396ba8fa1ef6d6", size = 13889363, upload-time = "2026-09-01T02:46:41.414Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/13/6893321d8fc1a742a276a5de796e1818cae33a0589b46f487a6cba2547c5/libigl-2.6.3-cp312-abi3-win_amd64.whl", hash = "sha256:1d91745ed0e78c56a04539e3231ce6faff49ae0dbe123caa2034e1886fcb2e7d", size = 20239839, upload-time = "2026-09-01T02:47:07.712Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/82/8fa1a7f3a9ac219f3ffd1f8aa3df4465747db3b98894a95d0c7b219db2dc/libigl-2.6.3-cp39-cp39-macosx_10_15_x86_64.whl", hash = "sha256:afd1f75c1a36a18e003b24144e1eda7f2242ebc81709d262be1c9ba6fad0b234", size = 13494842, upload-time = "2026-09-01T02:46:03.316Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/c8/b65942a33388a71c907cdb7d8261dd6aa5f39e2ebee185252507735c2015/libigl-2.6.3-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:b2174139e303d5d430ff0e83100d7e4a6167687bb6fd96c34026909cb02ae892", size = 12227331, upload-time = "2026-09-01T02:46:15.187Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/f5/07ea3bfaf564fea32ec3a4a4bde4b74d3fdab532e53499a1a3a6e67a9dd0/libigl-2.6.3-cp39-cp39-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a08a567e0ad5d4f49f8432cf05c7909a347926c5361aa7b34eb03f882bc87f13", size = 13172421, upload-time = "2026-09-01T02:46:31.548Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/ba/10f51859e1254be1e04c57e49a72aaecf98776e91450f1c35b5bd8a62e63/libigl-2.6.3-cp39-cp39-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a90178bfe428a141ad61ed7e8dac51710fe64432b352ab7ec3433dd8acb8946c", size = 13900852, upload-time = "2026-09-01T02:46:47.966Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/a0/92f1a3283119ca5f9afcf5c8e802e926865fc916b8095000c68d58238c0a/libigl-2.6.3-cp39-cp39-win_amd64.whl", hash = "sha256:e8d3e8f27e361f5dd594a2563e80ec792ebbd3364229b437afd5e9a99c0ffc75", size = 20256573, upload-time = "2026-09-01T02:47:15.986Z" },
 ]
 
 [[package]]

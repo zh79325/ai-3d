@@ -320,7 +320,7 @@ class Worker:
             p = mesh["positions"]
             rig = generate_rig_from_bbox(p.min(0).tolist(), p.max(0).tolist(),
                                          confidence=0.9)
-        joints_u16, weights_f32 = compute_skin_weights(
+        joints_u16, weights_f32, skin_report = compute_skin_weights(
             mesh["positions"], mesh["indices"], rig, settings.skin)
         rig_path = s.task_dir(task_id) / "rig.json"
         rig_path.write_text(json.dumps(rig.to_dict(), ensure_ascii=False, indent=2),
@@ -328,9 +328,16 @@ class Worker:
         s.register_artifact(task_id, ArtifactKind.RIG, rig_path)
         np.savez(s.task_dir(task_id) / "skin.npz",
                  joints=joints_u16, weights=weights_f32)
+        (s.task_dir(task_id) / "skin_report.json").write_text(
+            json.dumps(skin_report, ensure_ascii=False, indent=2), encoding="utf-8")
         s.update_task(task_id, overall_confidence=round(rig.overall_confidence(), 4))
+        st = skin_report.get("strain", {})
+        cmp_ = skin_report.get("components", {})
         s.set_stage(task_id, Stage.BUILD_RIG, StageStatus.RUNNING,
-                    f"骨架 22 关节（height={rig.height:.3f}m）+ 蒙皮 {len(joints_u16)} 顶点")
+                    f"骨架 22 关节（height={rig.height:.3f}m）+ 蒙皮 {len(joints_u16)} 顶点"
+                    f"（zero={skin_report.get('zero_rows')}, "
+                    f"strain_max={st.get('max')}, fallback={cmp_.get('fallback')}, "
+                    f"proxy={cmp_.get('proxy')}）")
         return StepResult.CONTINUE
 
     def _map_source(self, task_id: str) -> StepResult:

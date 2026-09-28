@@ -1,32 +1,42 @@
-"""无 Bone Heat 的确定性自动蒙皮。
+"""基于 libigl BBW（Bounded Biharmonic Weights）的确定性自动蒙皮。
 
-流程：骨段胶囊距离初始权重 → 左右软屏蔽 → 网格邻接 Laplacian 扩散平滑 →
-行归一化 → 每顶点保留 ≤max_influences 个骨骼 → 输出 JOINTS_0(u16)/WEIGHTS_0(f32)。
+流程：求解域焊接合并（位置近接触聚簇，导出网格不动）→ 连通分量 →
+逐分量骨段距离选 handle →（高模分量经 igl.decimate 代理）igl.bbw 求解 →
+按簇散射回原顶点 → 退化兜底最近骨 one-hot → 行归一 + top-K →
+输出 JOINTS_0(u16)/WEIGHTS_0(f32)，并附质量报告（岛统计/权重跳变/合成姿势应变）。
+
+蒙皮与源动画无关：输入仅 rest 网格与语义骨架；合成姿势应变为动画无关自检。
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Dict, List, Tuple
 
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import spsolve  # noqa: F401  (保留以备后续隐式扩散)
+from scipy.sparse.csgraph import connected_components
+from scipy.spatial import cKDTree
 
 from .skeleton import JOINTS, JOINT_INDEX, Rig, children_of
 from .settings import SkinConfig
 
+logger = logging.getLogger(__name__)
 
-def _bone_segments(rig: Rig) -> List[Tuple[int, np.ndarray, np.ndarray, float]]:
-    """返回 [(joint_index, head, tail, radius)]。"""
+_SYN_ANGLE = np.deg2rad(20.0)   # 合成自检姿势：每关节绕各世界轴的旋转角
+_SYN_MAX_EDGES = 50000          # 应变度量的采样边上限（高模控耗时）
+
+
+def _bone_segments(rig: Rig) -> List[Tuple[int, np.ndarray, np.ndarray]]:
+    """返回 [(joint_index, head, tail)]。"""
     segs = []
     for j in JOINTS:
         i = JOINT_INDEX[j]
         head = np.asarray(rig.heads[j], np.float64)
         ch = children_of(j)
         tail = np.asarray(rig.heads[ch[0]], np.float64) if ch else rig._leaf_tail(j)
-        length = float(np.linalg.norm(tail - head)) or (0.05 * rig.height)
-        radius = max(length * 0.5, 0.02 * rig.height)
-        segs.append((i, head, tail, radius))
+        segs.append((i, head, tail))
     return segs
 
 
@@ -39,85 +49,119 @@ def _segment_distance(P: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray
     return np.linalg.norm(P - proj, axis=1)
 
 
-def _build_adjacency(n_verts: int, indices: np.ndarray) -> sparse.csr_matrix:
-    """从三角面构建对称归一化邻接矩阵 A_norm（行和=1）。"""
-    tri = np.asarray(indices).reshape(-1, 3).astype(np.int64)
-    r = np.concatenate([tri[:, 0], tri[:, 1], tri[:, 2]])
-    c = np.concatenate([tri[:, 1], tri[:, 2], tri[:, 0]])
-    rows = np.concatenate([r, c])   # 对称化：每条边同时加 (a,b) 与 (b,a)
-    cols = np.concatenate([c, r])
-    data = np.ones(len(rows), np.float32)
-    A = sparse.coo_matrix((data, (rows, cols)), shape=(n_verts, n_verts)).tocsr()
-    A.data[:] = 1.0
-    A.sum_duplicates()
-    deg = np.asarray(A.sum(1)).ravel()
-    deg[deg == 0] = 1.0
-    Dinv = sparse.diags(1.0 / deg)
-    return (Dinv @ A).tocsr()
+def _all_segment_distances(P: np.ndarray, segs) -> np.ndarray:
+    """(N, nj) 每顶点到各骨段距离。"""
+    return np.stack([_segment_distance(P, h, t) for (_, h, t) in segs], axis=1)
 
 
-def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
-                         cfg: SkinConfig | None = None) -> Tuple[np.ndarray, np.ndarray]:
-    """返回 (joints_u16 (N,4), weights_f32 (N,4))。"""
-    cfg = cfg or SkinConfig()
-    P = np.ascontiguousarray(positions, dtype=np.float64)
+def _weld_solve_domain(P: np.ndarray, tri: np.ndarray, eps: float):
+    """位置近接触聚簇合并，返回 (V', F', cluster_of)。eps<=0 为恒等。
+
+    仅求解域合并：簇内原顶点共享同一行权重；导出网格与法线/UV 不动。
+    """
     n = len(P)
-    nj = len(JOINTS)
-    segs = _bone_segments(rig)
+    if eps <= 0 or len(tri) == 0:
+        return P, tri, np.arange(n, dtype=np.int64)
+    key = np.round(P / eps).astype(np.int64)
+    _, inv = np.unique(key, axis=0, return_inverse=True)
+    inv = inv.astype(np.int64)
+    np_ = int(inv.max()) + 1
+    rep = np.empty(np_, np.int64)
+    rep[inv[::-1]] = np.arange(n)[::-1]      # 簇内最早顶点作代表
+    Fp = inv[tri]
+    keep = (Fp[:, 0] != Fp[:, 1]) & (Fp[:, 1] != Fp[:, 2]) & (Fp[:, 0] != Fp[:, 2])
+    return P[rep], Fp[keep], inv
 
-    center_x = float(np.asarray(rig.heads["pelvis"])[0])
-    W = np.zeros((n, nj), dtype=np.float64)
-    for (ji, head, tail, radius) in segs:
-        d = _segment_distance(P, head, tail)
-        w = np.exp(-2.0 * (d / radius) ** 2)
-        # 左右软屏蔽：抑制跨中线影响
-        name = JOINTS[ji]
-        if name.endswith("_l") or name.endswith("_r"):
-            side = 1.0 if name.endswith("_l") else -1.0
-            s = side * (P[:, 0] - center_x) / (0.06 * rig.height + 1e-6)
-            mask = 1.0 / (1.0 + np.exp(-s))          # sigmoid
-            w *= (0.12 + 0.88 * mask)
-        W[:, ji] = w
 
-    # 行归一化（避免全零）
-    rs = W.sum(1, keepdims=True)
-    rs[rs < 1e-9] = 1.0
-    W = W / rs
+def _components(F: np.ndarray, n: int) -> Tuple[int, np.ndarray]:
+    """三角边连通分量。"""
+    if len(F) == 0:
+        return n, np.arange(n, dtype=np.int32)
+    r = F.reshape(-1)
+    c = np.roll(F, -1, axis=1).reshape(-1)
+    A = sparse.coo_matrix((np.ones(len(r), np.int8), (r, c)), shape=(n, n))
+    return connected_components(A, directed=False)
 
-    # Laplacian 扩散平滑
-    if cfg.diffusion_iters > 0 and n > 0 and len(indices) >= 3:
-        A = _build_adjacency(n, indices)
-        lam = float(cfg.diffusion_lambda)
-        for _ in range(int(cfg.diffusion_iters)):
-            W = (1.0 - lam) * W + lam * (A @ W)
-        rs = W.sum(1, keepdims=True); rs[rs < 1e-9] = 1.0
-        W = W / rs
 
-    # 附件岛刚性化：装甲片/挂饰等独立连通壳若聚合权重集中于单骨，
-    # 整岛 one-hot，避免刚性壳被多骨混合权重拉弯/半途滞留成碎片；
-    # 分散岛（体表马赛克）保持平滑权重以维持缝连续
-    if cfg.rigid_island_share > 0 and n > 0 and len(indices) >= 3:
-        from scipy.sparse.csgraph import connected_components
-        tri = np.asarray(indices).reshape(-1, 3).astype(np.int64)
-        r = np.concatenate([tri[:, 0], tri[:, 1], tri[:, 2]])
-        c = np.concatenate([tri[:, 1], tri[:, 2], tri[:, 0]])
-        A = sparse.coo_matrix((np.ones(len(r), np.int8), (r, c)),
-                              shape=(n, n)).tocsr()
-        ncomp, lab = connected_components(A, directed=False)
-        if ncomp > 1:
-            for k in range(ncomp):
-                sel = lab == k
-                agg = W[sel].sum(0)
-                tot = agg.sum()
-                if tot <= 1e-9:
-                    continue
-                agg = agg / tot
-                j = int(np.argmax(agg))
-                if agg[j] >= float(cfg.rigid_island_share):
-                    W[sel] = 0.0
-                    W[sel, j] = 1.0
+def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
+    """按骨段距离选 handle 骨，返回 [(局部顶点, handle 列, 关节索引)]。
 
-    # top-K 影响 + 归一化
+    H = 距离 top-max_handles 且 d_j <= d_min + handle_margin*分量对角；必含最近骨；
+    每骨 handle 顶点 = 分量内离该骨段最近顶点；同顶点被多骨抢占保留更近者。
+    """
+    D = _all_segment_distances(Vk, segs)                 # (nv, nj)
+    dmin = D.min(axis=0)
+    diag = float(np.linalg.norm(Vk.max(0) - Vk.min(0))) if len(Vk) > 1 else 0.0
+    thr = float(dmin.min()) + float(cfg.handle_margin) * diag
+    order = np.argsort(dmin)
+    picked = [int(j) for j in order if dmin[j] <= thr][: int(cfg.max_handles)]
+    if not picked:
+        picked = [int(order[0])]
+    handles: List[Tuple[int, int, int]] = []
+    used: Dict[int, int] = {}
+    for col, ji in enumerate(picked):
+        v = int(np.argmin(D[:, ji]))
+        if v in used:
+            continue
+        used[v] = col
+        handles.append((v, col, ji))
+    return handles
+
+
+def _bbw_component(Vk: np.ndarray, Fk: np.ndarray, handles, cfg: SkinConfig):
+    """单分量 BBW 求解，返回 (Wk (nv,#handles), proxy_used, transferred)。
+
+    超 bbw_max_verts 时 igl.decimate 坍缩代理求解 + cKDTree 最近邻传回。
+    解为未归一化权重，负值 clamp 仅作保险（BBW 有界保证非负）。
+    """
+    import igl  # 延迟导入：libigl 缺失时在求解点报错而非导入期
+    V = np.ascontiguousarray(Vk, np.float64)
+    F = np.ascontiguousarray(Fk, np.int64)
+    b = np.array([h[0] for h in handles], np.int64)
+    bc = np.eye(len(handles))
+    proxy_used = False
+    transferred = 0
+    if len(V) > int(cfg.bbw_max_verts):
+        max_faces = max(64, int(cfg.bbw_max_verts) // 2)
+        U, G = igl.decimate(V, F, max_faces)[:2]
+        U = np.asarray(U, np.float64)
+        G = np.asarray(G, np.int64)
+        _, hidx = cKDTree(U).query(V[b])
+        b2: List[int] = []
+        bc2: List[np.ndarray] = []
+        seen: Dict[int, int] = {}
+        for col, hv in enumerate(hidx):
+            hv = int(hv)
+            if hv in seen:
+                continue
+            seen[hv] = len(b2)
+            b2.append(hv)
+            bc2.append(bc[col])
+        if not b2:
+            raise RuntimeError("decimate 代理丢失全部 handle")
+        Wp = igl.bbw(U, G, np.array(b2, np.int64), np.asarray(bc2, np.float64),
+                     partition_unity=True)
+        _, idx = cKDTree(U).query(V)
+        Wk = np.asarray(Wp, np.float64)[idx]
+        proxy_used = True
+        transferred = len(V)
+    else:
+        Wk = np.asarray(igl.bbw(V, F, b, bc, partition_unity=True), np.float64)
+    return np.clip(Wk, 0.0, None), proxy_used, transferred
+
+
+def _axis_rot(ax: int, ang: float) -> np.ndarray:
+    R = np.eye(3)
+    c, s = np.cos(ang), np.sin(ang)
+    i, j = (ax + 1) % 3, (ax + 2) % 3
+    R[i, i], R[j, j] = c, c
+    R[i, j], R[j, i] = -s, s
+    return R
+
+
+def _topk(W: np.ndarray, cfg: SkinConfig, nj: int) -> Tuple[np.ndarray, np.ndarray]:
+    """每顶点保留 ≤max_influences 个骨骼，输出 (N,4) u16 / (N,4) f32。"""
+    n = len(W)
     k = max(1, min(int(cfg.max_influences), nj))
     joints = np.zeros((n, 4), dtype=np.uint16)
     weights = np.zeros((n, 4), dtype=np.float32)
@@ -128,9 +172,137 @@ def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
         order = np.argsort(-vals, axis=1)
         top = np.take_along_axis(top, order, axis=1)
         vals = np.take_along_axis(vals, order, axis=1)
-        vs = vals.sum(1, keepdims=True); vs[vs < 1e-9] = 1.0
+        vs = vals.sum(1, keepdims=True)
+        vs[vs < 1e-9] = 1.0
         vals = vals / vs
         m = min(k, 4)
         joints[:, :m] = top[:, :m].astype(np.uint16)
         weights[:, :m] = vals[:, :m].astype(np.float32)
     return joints, weights
+
+
+def _synthetic_strain(P: np.ndarray, edges: np.ndarray, joints: np.ndarray,
+                      weights: np.ndarray, rig: Rig) -> Dict[str, float]:
+    """合成姿势应变：每关节绕 3 世界轴各旋转 20°，量采样边长变化率（动画无关自检）。"""
+    if len(edges) == 0:
+        return {"med": 0.0, "max": 0.0, "gt20pct": 0, "edges": 0}
+    e0, e1 = edges[:, 0], edges[:, 1]
+    L0 = np.linalg.norm(P[e0] - P[e1], axis=1)
+    ok = L0 > 1e-9
+    e0, e1, L0 = e0[ok], e1[ok], L0[ok]
+    H = np.asarray([rig.heads[j] for j in JOINTS], np.float64)
+    W4 = weights.astype(np.float64)
+    J4 = joints.astype(np.int64)
+    Hs = H[J4]                                   # (n,4,3)
+    offs = P[:, None, :] - Hs                    # 相对各影响骨 head 的 rest 偏移
+    worst = np.zeros(len(e0))
+    for ji in range(len(JOINTS)):
+        mask = (J4 == ji)                        # (n,4) 本姿势受旋转的影响槽
+        if not mask.any():
+            continue
+        for ax in range(3):
+            R = _axis_rot(ax, _SYN_ANGLE)
+            rot = np.where(mask[..., None], offs @ R.T, offs)
+            Vp = (W4[..., None] * (rot + Hs)).sum(1)
+            ratio = np.linalg.norm(Vp[e0] - Vp[e1], axis=1) / L0
+            np.maximum(worst, np.abs(ratio - 1.0), out=worst)
+    return {"med": round(float(np.median(worst)), 4),
+            "max": round(float(worst.max()), 4),
+            "gt20pct": int((worst > 0.2).sum()),
+            "edges": int(len(worst))}
+
+
+def _skin_report(P, tri, joints, weights, W, rig, ncomp, fallback,
+                 proxy_comps, transferred, island_stats, n_clusters,
+                 elapsed) -> Dict:
+    zero_rows = int((weights.sum(1) == 0).sum())
+    if len(tri):
+        r = tri[:, [0, 1, 2, 0]].reshape(-1)
+        c = tri[:, [1, 2, 0, 1]].reshape(-1)
+        jump = np.abs(W[r] - W[c]).sum(1)
+        jump_stat = {"mean": round(float(jump.mean()), 4),
+                     "max": round(float(jump.max()), 4)}
+        pairs = np.sort(np.stack([r, c], 1), axis=1)
+        edges = np.unique(pairs, axis=0)
+    else:
+        jump_stat = {"mean": 0.0, "max": 0.0}
+        edges = np.zeros((0, 2), np.int64)
+    if len(edges) > _SYN_MAX_EDGES:
+        sel = np.random.default_rng(0).choice(len(edges), _SYN_MAX_EDGES, replace=False)
+        edges = edges[sel]
+    return {
+        "zero_rows": zero_rows,
+        "island_stats": island_stats,
+        "weld": {"clusters": int(n_clusters), "merged_verts": int(len(P) - n_clusters)},
+        "components": {"count": int(ncomp), "fallback": int(fallback),
+                       "proxy": int(proxy_comps), "transferred": int(transferred)},
+        "weight_jump": jump_stat,
+        "strain": _synthetic_strain(P, edges, joints, weights, rig),
+        "seconds": round(elapsed, 2),
+    }
+
+
+def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
+                         cfg: SkinConfig | None = None
+                         ) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    """返回 (joints_u16 (N,4), weights_f32 (N,4), report)。"""
+    cfg = cfg or SkinConfig()
+    t0 = time.time()
+    P = np.ascontiguousarray(positions, dtype=np.float64)
+    n = len(P)
+    nj = len(JOINTS)
+    tri = (np.asarray(indices).reshape(-1, 3).astype(np.int64)
+           if len(indices) else np.zeros((0, 3), np.int64))
+    segs = _bone_segments(rig)
+
+    # 原网格岛统计（输入质量诊断：正常资产应有主导主岛，马赛克 AI 网格无）
+    n_orig, lab_orig = _components(tri, n)
+    sizes = np.bincount(lab_orig, minlength=n_orig)
+    island_stats = {"components": int(n_orig),
+                    "largest_share": round(float(sizes.max() / max(n, 1)), 4),
+                    "tiny_lt16": int((sizes < 16).sum())}
+
+    W = np.zeros((n, nj), dtype=np.float64)
+    Vp, Fp, cluster_of = _weld_solve_domain(P, tri, float(cfg.weld_epsilon))
+    ncomp, lab = _components(Fp, len(Vp))
+    comp_of_orig = lab[cluster_of]
+    fallback = proxy_comps = transferred = 0
+    for k in range(ncomp):
+        sk = np.nonzero(lab == k)[0]
+        ov = np.nonzero(comp_of_orig == k)[0]
+        if len(ov) == 0:
+            continue
+        Vk = Vp[sk]
+        loc = -np.ones(len(Vp), np.int64)
+        loc[sk] = np.arange(len(sk))
+        Fk = loc[Fp[np.nonzero(lab[Fp[:, 0]] == k)[0]]] if len(Fp) else Fp
+        Wk = None
+        handles = _component_handles(Vk, segs, cfg) if len(sk) >= 4 else []
+        if handles:
+            try:
+                Wk, pu, tr = _bbw_component(Vk, Fk, handles, cfg)
+                proxy_comps += int(pu)
+                transferred += tr
+            except Exception as exc:  # noqa: BLE001 求解失败一律落最近骨兜底
+                logger.warning("分量 %d（%d 顶点）BBW 求解失败，落最近骨兜底：%s",
+                               k, len(sk), exc)
+        if Wk is None or Wk.shape[0] != len(sk) or (Wk.sum(1) < 1e-6).any():
+            fallback += 1
+            W[ov, np.argmin(_all_segment_distances(P[ov], segs), axis=1)] = 1.0
+            continue
+        rs = Wk.sum(1, keepdims=True)
+        rs[rs < 1e-9] = 1.0
+        Wk /= rs
+        col_to_joint = np.array([h[2] for h in handles], np.int64)
+        Wc = np.zeros((len(sk), nj))
+        Wc[:, col_to_joint] = Wk
+        W[ov] = Wc[loc[cluster_of[ov]]]
+
+    rs = W.sum(1, keepdims=True)
+    rs[rs < 1e-9] = 1.0
+    W /= rs
+    joints, weights = _topk(W, cfg, nj)
+    report = _skin_report(P, tri, joints, weights, W, rig, ncomp, fallback,
+                          proxy_comps, transferred, island_stats, len(Vp),
+                          time.time() - t0)
+    return joints, weights, report

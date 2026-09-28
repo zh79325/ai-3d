@@ -243,7 +243,7 @@ def test_retarget_animation_identity_source(tmp_path):
 def test_skin_weights_normalized(tmp_path):
     positions, indices = _humanoid_mesh()
     rig = generate_rig_from_bbox(positions.min(0), positions.max(0))
-    joints, weights = compute_skin_weights(positions, indices, rig)
+    joints, weights, _report = compute_skin_weights(positions, indices, rig)
     assert joints.shape == (len(positions), 4)
     assert weights.shape == (len(positions), 4)
     sums = weights.sum(1)

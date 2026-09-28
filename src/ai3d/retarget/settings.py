@@ -84,11 +84,11 @@ class SolveConfig:
 
 @dataclass
 class SkinConfig:
-    capsule_radius_scale: float = 0.5  # 骨段胶囊半径 = 骨长 * scale
-    diffusion_iters: int = 8           # Laplacian 扩散迭代次数
-    diffusion_lambda: float = 0.5      # 扩散步长
     max_influences: int = 4            # 每顶点最大骨骼影响数
-    rigid_island_share: float = 0.6    # 连通岛聚合权重主骨占比≥该值时整岛 one-hot 刚性蒙皮
+    weld_epsilon: float = 2e-3         # 求解域焊接合并半径(m)；=0 关闭合并退化为逐岛
+    handle_margin: float = 0.25        # handle 选骨容差 = d_min + margin*分量 bbox 对角
+    max_handles: int = 3               # 单分量最大 handle 骨数
+    bbw_max_verts: int = 30000         # 分量顶点超阈走 igl.decimate 代理求解+最近邻传回
 
 
 @dataclass
