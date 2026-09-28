@@ -91,7 +91,10 @@ def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
     顶点 = 骨段中段（投影参数 0.3~0.7）、贴近骨段、且明确胜出（d1 <= 0.8*d2）
     的顶点；胯部/关节等距区留白由 BBW 谐波混合，避免两骨约束带相邻硬碰硬
     产生权重断崖；末端骨（头/手/脚）约束带放宽到 t∈[0.2,1.35] 整块刚性带动，
-    避免面部/手指落在谐波混合区被剪切；无约束顶点时退化为离骨段中点最近顶点。
+    且免除 clear 条件（面部/手指与父骨等距仍应刚性归属末端骨；竞争的非末端骨
+    在等距边界必败 clear，硬碰硬邻接仍不可能）；head 额外把 head 点与颈段之间
+    （t∈[0,0.2)）的前半空间（下巴/脸颊）刚性归 head，否则落入 head/neck 谐波
+    混合、chest 权重沿颈细管上传致面部滞后头旋转；无约束顶点时退化为离骨段中点最近顶点。
     """
     D = _all_segment_distances(Vk, segs)                 # (nv, nj)
     dmin = D.min(axis=0)
@@ -116,12 +119,17 @@ def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
         ab = b - a
         l2 = float(ab @ ab)
         t = ((Vk - a) @ ab) / l2 if l2 > 1e-12 else np.zeros(len(Vk))
-        if children_of(JOINTS[ji]):                      # 非末端骨：中段带
-            tlo, thi, rad = 0.3, 0.7, band_r[ji]
-        else:                                            # 末端骨：整块刚性带
-            tlo, thi, rad = 0.2, 1.35, band_r[ji] + 0.03 * diag
-        cand = np.nonzero((t >= tlo) & (t <= thi) & (D[:, ji] <= rad)
-                          & clear & (nearest_sel == col))[0]
+        if children_of(JOINTS[ji]):                      # 非末端骨：中段带 + clear
+            zone = (t >= 0.3) & (t <= 0.7) & (nearest_sel == col)
+            rad = band_r[ji]
+            ok_clear = clear
+        else:                                            # 末端骨：整块刚性带，免 clear
+            zone = (t >= 0.2) & (t <= 1.35) & (nearest_sel == col)
+            rad = band_r[ji] + 0.03 * diag
+            ok_clear = np.ones(len(Vk), bool)
+            if JOINTS[ji] == "head":                     # 下巴区：前半空间刚性归 head
+                zone |= (t >= 0.0) & (t < 0.2) & ((Vk - a) @ np.array([0.0, 0.0, 1.0]) > 0)
+        cand = np.nonzero(zone & (D[:, ji] <= rad) & ok_clear)[0]
         if len(cand) == 0:                               # 退化：取离骨段中点最近顶点
             mid = 0.5 * (a + b)
             cand = np.array([int(np.argmin(np.linalg.norm(Vk - mid, axis=1)))])

@@ -227,6 +227,7 @@ let rigGroup = null, rigTaskId = null, viewMode = 'both';
 // 迷你窗状态必须在 animate() 首次调用前声明（let 有 TDZ，后置会令整个 module 报错中断）
 let miniRenderer = null, miniScene = null, miniCam = null, miniControls = null;
 let miniMixer = null, miniModel = null, miniTaskId = null, miniHelper = null;
+let miniKey = null;   // task_id|source 产物 created_at：重上传/重归一化后会变，驱动小窗重载
 // 审核对比视图：三联纵深纵队 ①源+骨骼 ②源纯骨骼 ③绑定骨骼+目标
 let rvOn = false, rvParts = [], curRig = null;
 const modelOffset = new THREE.Vector3();
@@ -333,7 +334,7 @@ function ensureMini() {
 function clearMini() {
   if (miniHelper) { miniScene.remove(miniHelper); miniHelper = null; }
   if (miniModel) { miniScene.remove(miniModel); miniModel.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
-  miniModel = null; miniMixer = null; miniTaskId = null;
+  miniModel = null; miniMixer = null; miniTaskId = null; miniKey = null;
 }
 function loadMiniPreview(url, taskId) {
   ensureMini();
@@ -727,9 +728,13 @@ function refreshUploadState(info) {
   if (hasSource) document.getElementById('srcName').textContent = '已上传：' + (info.source_filename || '');
   document.getElementById('btnDetect').disabled = !hasTarget;
   document.getElementById('btnMigrate').disabled = !(hasSource && rigDone);
-  // 源动画就绪 → 右上角小窗自动预览
-  if (hasSource && miniTaskId !== info.task_id) {
-    loadMiniPreview(`/v1/jobs/${info.task_id}/source.glb`, info.task_id);
+  // 源动画就绪 → 右上角小窗自动预览；source 产物 created_at 变化（同任务重上传）也重载
+  const srcArt = (info.artifacts || []).find(a => a.kind === 'source')
+    || (info.artifacts || []).find(a => a.kind === 'source_raw');
+  const miniKeyNow = info.task_id + '|' + (srcArt ? srcArt.created_at : '');
+  if (hasSource && miniKeyNow !== miniKey) {
+    miniKey = miniKeyNow;
+    loadMiniPreview(`/v1/jobs/${info.task_id}/source.glb?v=${Date.now()}`, info.task_id);
   } else if (!hasSource && miniTaskId !== null) {
     clearMini();
     document.getElementById('miniPanel').style.display = 'none';
@@ -932,7 +937,7 @@ document.getElementById('btnUploadTarget').onclick = async () => {
     await api(`/v1/jobs/${currentTaskId}/upload/target`, { method: 'POST', body: fd });
     msg.textContent = '已上传，预览就绪';
     clearModel();
-    loadPreview(`/v1/jobs/${currentTaskId}/target.glb`).catch(e => log('预览失败：' + e.message));
+    loadPreview(`/v1/jobs/${currentTaskId}/target.glb?v=${Date.now()}`).catch(e => log('预览失败：' + e.message));
     log('模型已上传，可预览');
     startPoll();
   } catch (e) { msg.textContent = '上传失败：' + e.message; }
@@ -995,7 +1000,7 @@ function previewResultAnim() {
   if (rvOn) exitReview();
   // 结果网格自带蒙皮动画：静态 rest rig 叠层会随播放错位，切纯模型视图
   viewMode = 'mesh'; syncViewBar();
-  loadPreview(`/v1/jobs/${currentTaskId}/result.glb`, { play: true })
+  loadPreview(`/v1/jobs/${currentTaskId}/result.glb?v=${Date.now()}`, { play: true })
     .then(() => log('结果动画预览中：底部播放条可暂停/拖进度，右上小窗为源动画对照'))
     .catch(e => log('结果预览失败：' + e.message));
 }
