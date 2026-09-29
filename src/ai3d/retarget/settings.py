@@ -92,6 +92,15 @@ class SkinConfig:
 
 
 @dataclass
+class UniRigConfig:
+    # UniRig 骨架蒙皮新链路（method='unirig'，CPU 进程内推理）
+    enabled: bool = True             # false 时 /bind?method=unirig 直接 400
+    threads: int = 0                 # torch CPU 线程数；0 = os.cpu_count()
+    seed: int = 12345                # 与上游 quick_inference 同值，结果可复现
+    timeout_s: int = 3600            # 单阶段（骨架/蒙皮各自）超时上限，防挂死绑定线程
+
+
+@dataclass
 class MapConfig:
     name_weight: float = 1.0
     hierarchy_weight: float = 0.6
@@ -123,6 +132,7 @@ class RetargetSettings:
     gating: GatingConfig = field(default_factory=GatingConfig)
     solve: SolveConfig = field(default_factory=SolveConfig)
     skin: SkinConfig = field(default_factory=SkinConfig)
+    unirig: UniRigConfig = field(default_factory=UniRigConfig)
     mapping: MapConfig = field(default_factory=MapConfig)
     retarget: RetargetConfig = field(default_factory=RetargetConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -204,6 +214,7 @@ class RetargetSettings:
         s.gating = _merge_dc(s.gating, raw.get("gating"))
         s.solve = _merge_dc(s.solve, raw.get("solve"))
         s.skin = _merge_dc(s.skin, raw.get("skin"))
+        s.unirig = _merge_dc(s.unirig, raw.get("unirig"))
         s.mapping = _merge_dc(s.mapping, raw.get("mapping"))
         s.retarget = _merge_dc(s.retarget, raw.get("retarget"))
         s.model = _merge_dc(s.model, raw.get("model"))
@@ -234,6 +245,8 @@ class RetargetSettings:
             )
         if self.skin.max_influences < 1:
             raise ValueError("skin.max_influences 必须 >= 1")
+        if self.unirig.timeout_s <= 0:
+            raise ValueError(f"unirig.timeout_s 必须 > 0：{self.unirig.timeout_s}")
         # 路径可解析（不强制存在，运行时会创建）
         _ = self.project_dir
         _ = self.sqlite_file

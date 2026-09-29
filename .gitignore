@@ -60,3 +60,6 @@ Thumbs.db
 !.qoder/rules/
 web/node_modules/
 web/dist/
+# UniRig vendor 仓库（scripts/setup_unirig.py clone）与离线权重
+third_party/UniRig/
+models/unirig/

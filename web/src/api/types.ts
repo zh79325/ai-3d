@@ -301,11 +301,18 @@ export interface ViewListResponse {
   urls: string[]
 }
 
+/**
+ * S2 绑定链路选择：`ai`=多视角 DWPose（默认，旧链路）/ `bbox`=比例骨架（旧链路兜底）/
+ * `unirig`=UniRig 学习模型 CPU 推理（新链路，产物契约与前两者一致）。
+ */
+export type BindMethod = 'ai' | 'bbox' | 'unirig'
+
 /** `POST /bind` 与 `POST /rebind` 的回执：S2 已排到后台线程。 */
 export interface BindResponse {
   status: string
   asset_id: string
   pose_ai: boolean
+  method: BindMethod | string
   binding: BindingInfo
   message: string
 }
@@ -337,6 +344,37 @@ export interface ReskinResponse {
   reskin: boolean
   binding: BindingInfo
   message: string
+}
+
+/**
+ * `GET /v2/assets/{id}/unirig/log`：UniRig 执行输出的**增量分片**。
+ *
+ * UniRig 一次推理好几分钟（实测骨架 ~220s、蒙皮 ~25s），而 `BindingInfo.stage`
+ * 只有 `UNIRIG_EXTRACT/SKELETON/SKIN/ADAPT` 四个粗粒度值，看不出是在加载权重、
+ * 跑 batch 还是已经卡死 —— 后端把 Lightning 进度条 / print / logging / 失败
+ * traceback 全量落盘到 `<asset_dir>/unirig.log`，本接口按字节 offset 分片吐出。
+ *
+ * 用法：首次 `offset=0`，之后每次传**上次响应里的 `offset`**。
+ * - `reset=true`：文件被重跑覆盖、已从头返回，要先清空已渲染的旧输出；
+ * - `truncated=true`：这一片没拉完，下一轮接着拉（不会丢中间内容）；
+ * - `exists=false`：还没跑过 UniRig（或文件刚还没建），**不是错误**；
+ * - `running=false`：后端已停笔，再拉一次收尾即可停止轮询。
+ */
+export interface UniRigLogResponse {
+  asset_id: string
+  exists: boolean
+  /** 文件当前总字节数（不是本次返回的长度）。 */
+  size: number
+  /** 下次请求该带的 offset。 */
+  offset: number
+  text: string
+  reset: boolean
+  truncated: boolean
+  state: BindingState
+  stage: string | null
+  message: string | null
+  error: string | null
+  running: boolean
 }
 
 // --------------------------------------------------------------------------- //

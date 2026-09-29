@@ -4,13 +4,16 @@
 模型的作业复用 —— 这正是 assets / jobs 拆分的意义（换个动画不必重算蒙皮）。
 S3（重定向）与 S4（导出）是作业级的，在 P4 / P5 接入本类。
 
-S2 有两条路径：
+S2 有三条路径：
 
 - ``pose_ai=True``（默认，与 ``/v1`` 一致）：等前端回传多视角图 → DWPose 出 2D 关键点
   → 加权三角化 + 对称/比例/骨长约束 → 三维关节 → 蒙皮。视角图没到就停在
   ``WAIT_VIEWS``，``POST /v2/assets/{id}/views`` 到达后自动续跑。
 - ``pose_ai=False``：直接按网格包围盒的人体比例生成骨架 → 蒙皮。适合非人形/道具，
   或 DWPose 检测不到人时的兜底。
+- ``method='unirig'``（:meth:`run_binding_unirig`）：UniRig 学习模型 CPU 推理骨架+蒙皮
+  → 语义适配到 22 关节。不需要视角图（不产生 WAIT_VIEWS），产物契约与上两条一致
+  （rig.json / skin.npz / skin_report.json），分钟级耗时同样后台线程 + 轮询进度。
 
 蒙皮（libigl BBW）是 S2 最慢的一步（万级顶点数秒到十几秒），故一律后台线程跑，
 子步骤进度落 ``bindings.stage`` / ``message``，前端轮询素材详情即可画进度条。
@@ -23,15 +26,20 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from . import stages
 from .asset_store import AssetStore, NotFoundError, StateError, get_asset_store
 from .schemas import RigPatch, Stage
 from .schemas_v2 import AssetKind, BindingInfo, BindingState
+from .settings import get_settings
 from .skeleton import Rig, apply_patch
+from .unirig import log_capture
 
 logger = logging.getLogger(__name__)
+
+BIND_METHODS = ("ai", "bbox", "unirig")   # /bind 与 /rebind 的 method 查询参数取值
 
 
 class BindingError(Exception):
@@ -132,6 +140,78 @@ class JobWorker:
         logger.info("S2 完成 %s（kind=%s）：%s", asset_id, row["kind"], message)
         return self.store.binding_info(asset_id)
 
+    def run_binding_unirig(self, asset_id: str,
+                           snapshot: Optional[Tuple[bool, Optional[str]]] = None
+                           ) -> BindingInfo:
+        """跑 S2 的 UniRig 新链路：CPU 推理骨架+蒙皮 → 语义适配到 22 关节。
+
+        与 :meth:`run_binding` 同样 per-asset 锁、失败回滚（保留上一次可用产物）；
+        不需要视角图故不产生 ``WAIT_VIEWS``。进度 stage 用自由文本
+        ``UNIRIG_EXTRACT / UNIRIG_SKELETON / UNIRIG_SKIN / UNIRIG_ADAPT``
+        （``bindings.stage`` 本就是 TEXT 列，不动 ``schemas.Stage`` 枚举）。
+
+        全程输出（Lightning 进度条 / print / logging / 失败 traceback）由
+        :mod:`unirig.log_capture` 按线程分流落 ``<asset_dir>/unirig.log``，前端用
+        ``GET /v2/assets/{id}/unirig/log?offset=N`` 增量轮询看实时进度 ——
+        stage 只有四个粗粒度值，一次推理好几分钟，不看日志根本不知道卡在哪。
+        """
+        from .unirig import adapt as unirig_adapt
+        from .unirig import predict as unirig_predict
+
+        row = self._require_model(asset_id)
+        glb = self.store.glb_path(asset_id)
+        out_dir = self.store.asset_dir(asset_id)
+        work_dir = self.store.unirig_work_dir(asset_id)   # 中间产物（raw/骨架/蒙皮 npz）
+        log_path = self.store.unirig_log_path(asset_id)
+        had_artifacts, prev_state = snapshot or self._snapshot(asset_id)
+        stage = "UNIRIG_EXTRACT"
+        lock = self._lock_for(asset_id)
+        if not lock.acquire(blocking=False):
+            raise StateError(f"素材 {asset_id} 的 S2 正在执行，请等它跑完")
+        header = (f"==== UniRig S2 asset={asset_id} kind={row['kind']} "
+                  f"start={time.strftime('%Y-%m-%d %H:%M:%S')} ====\n"
+                  f"输入 GLB：{glb}\n工作目录：{work_dir}")
+        try:
+            with log_capture.capture(log_path, header=header):
+                try:
+                    self.store.update_binding(asset_id, state=BindingState.RUNNING, error=None)
+                    align = self.store.load_align(asset_id) or {}
+                    height_m = ((align.get("unit") or {}).get("height_m")
+                                or (align.get("final") or {}).get("height_m"))
+
+                    def _progress(st: str, msg: str) -> None:
+                        self.store.set_binding_progress(asset_id, st, msg)
+
+                    info = unirig_predict.predict_unirig(
+                        glb, work_dir, get_settings().unirig, progress=_progress)
+                    stage = "UNIRIG_ADAPT"
+                    log_capture.set_phase("UNIRIG_ADAPT 语义适配 + 权重聚合")
+                    self.store.set_binding_progress(
+                        asset_id, stage, "语义适配：UniRig 骨架 → 22 关节 + 权重聚合…")
+                    rig, n_verts, report = unirig_adapt.build_binding(
+                        glb, work_dir, out_dir,
+                        height_m=float(height_m) if height_m else None)
+                    unirig_predict.copy_debug_artifacts(work_dir, out_dir)
+                    message = (
+                        f"骨架 {len(rig.heads)} 关节（UniRig CPU，height={rig.height:.3f}m，"
+                        f"推理 {info.get('total_s')}s） + 蒙皮 {n_verts} 顶点"
+                        f"（{stages.skin_summary(report)}, coverage={report.get('coverage')}）")
+                    self.store.mark_binding_done(asset_id,
+                                                 confidence=rig.overall_confidence(),
+                                                 revision=rig.revision, message=message)
+                    # 成功摘要也要进日志：它写在 capture 里，看日志就能知道结果
+                    logger.info("S2(unirig) 完成 %s（kind=%s）：%s",
+                                asset_id, row["kind"], message)
+                    return self.store.binding_info(asset_id)
+                except (RuntimeError, ValueError, OSError, TimeoutError) as exc:
+                    # 在 capture 内 exception：traceback 跟着写进 unirig.log，
+                    # 前端轮询到的最后几行就是失败原因，不用去翻服务控制台
+                    logger.exception("S2(unirig) 失败 asset=%s stage=%s", asset_id, stage)
+                    self._fail_binding(asset_id, str(exc), stage, had_artifacts, prev_state)
+                    raise BindingError(str(exc)) from exc
+        finally:
+            lock.release()
+
     def run_reskin(self, asset_id: str,
                    snapshot: Optional[Tuple[bool, Optional[str]]] = None) -> BindingInfo:
         """人工微调关节后**只重算蒙皮**：``rig.json`` 保持人工版本与 revision 不变。
@@ -187,19 +267,35 @@ class JobWorker:
     # ------------------------------------------------------------------ #
     # 后台执行
     # ------------------------------------------------------------------ #
-    def start_binding(self, asset_id: str, pose_ai: bool = True) -> threading.Thread:
+    def start_binding(self, asset_id: str, pose_ai: bool = True,
+                      method: str = "ai") -> threading.Thread:
         """后台跑 S2（蒙皮慢，路由不阻塞）。
 
         准入校验（素材存在 / 是模型 / S1 已落库 / 未在跑）在**当前线程**做完再起线程：
         放到线程里的话，400/409 只会躺在后台日志里，前端拿到 200 却不知道根本没启动。
+
+        ``method='unirig'`` 走 :meth:`run_binding_unirig`（``pose_ai`` 忽略）；环境/权重
+        未就绪也在这里同步抛 ``BindingInputError`` → 路由翻 400，而不是让素材落 FAILED。
         """
         self._require_model(asset_id)
+        if method == "unirig":
+            from .unirig import predict as unirig_predict
+
+            cfg = get_settings().unirig
+            if not cfg.enabled:
+                raise BindingInputError("UniRig 链路未启用（retarget.yaml 的 unirig.enabled=false）")
+            try:
+                unirig_predict.check_ready()
+            except RuntimeError as exc:
+                raise BindingInputError(str(exc)) from exc
         self._require_idle(asset_id)
         snapshot = self._snapshot(asset_id)
         # 先同步置 RUNNING 再起线程：否则路由返回后前端立刻轮询，会读到上一轮的
         # READY（重算蒙皮尤其明显），把「还没开始」当成「已经跑完」。
         self.store.update_binding(asset_id, state=BindingState.RUNNING,
                                   stage=None, message=None, error=None)
+        if method == "unirig":
+            return self._start(self.run_binding_unirig, asset_id, snapshot)
         return self._start(self.run_binding, asset_id, pose_ai, snapshot)
 
     def start_reskin(self, asset_id: str) -> threading.Thread:

@@ -19,6 +19,7 @@ import type {
   AssetInfo,
   AssetKind,
   AssetListResponse,
+  BindMethod,
   BindResponse,
   Conventions,
   CreateAssetResponse,
@@ -30,6 +31,7 @@ import type {
   RigDoc,
   RigPatch,
   SkinReport,
+  UniRigLogResponse,
   UploadViewsResponse,
   ViewListResponse,
   ViewSpec,
@@ -163,15 +165,20 @@ export const confirmAsset = (
     `/v2/assets/${enc(assetId)}/confirm${query({ pose_ai: poseAi, auto_bind: autoBind })}`,
   )
 
-/** 起 S2 绑定（后台线程跑，立即返回；用 `usePollAsset` 跟进度）。 */
-export const bindAsset = (assetId: string, poseAi = true) =>
+/**
+ * 起 S2 绑定（后台线程跑，立即返回；用 `usePollAsset` 跟进度）。
+ *
+ * `method`：`ai`（多视角，默认）/ `bbox`（比例骨架，等价 poseAi=false）/
+ * `unirig`（UniRig CPU 新链路，不需视角图）。默认 `ai`，旧行为不变。
+ */
+export const bindAsset = (assetId: string, poseAi = true, method: BindMethod = 'ai') =>
   send<BindResponse>(
-    'POST', `/v2/assets/${enc(assetId)}/bind${query({ pose_ai: poseAi })}`)
+    'POST', `/v2/assets/${enc(assetId)}/bind${query({ pose_ai: poseAi, method })}`)
 
 /** 重跑 S2。与 `/bind` 同一实现，差别只在语义：它会**覆写** rig.json（人工 revision 丢）。 */
-export const rebindAsset = (assetId: string, poseAi = true) =>
+export const rebindAsset = (assetId: string, poseAi = true, method: BindMethod = 'ai') =>
   send<BindResponse>(
-    'POST', `/v2/assets/${enc(assetId)}/rebind${query({ pose_ai: poseAi })}`)
+    'POST', `/v2/assets/${enc(assetId)}/rebind${query({ pose_ai: poseAi, method })}`)
 
 // --------------------------------------------------------------------------- //
 // S2 绑定：多视角回传 / 关节微调 / 蒙皮报告
@@ -227,6 +234,17 @@ export const patchRig = (assetId: string, patch: RigPatch, reskin = true) =>
 /** 只重算蒙皮（骨架 revision 与 `source="manual"` 标记都不变）。 */
 export const reskinAsset = (assetId: string) =>
   send<ReskinResponse>('POST', `/v2/assets/${enc(assetId)}/reskin`)
+
+/**
+ * 增量拉取 UniRig 执行日志（`<asset_dir>/unirig.log`）。
+ *
+ * `offset` 传**上一次响应里的同名字段**（首次传 0）；后端按字节分片，一次最多
+ * `maxBytes`（下限 1KB），剩下的下一轮接着拉。每行自带 `[+ 12.3s]` 相对时间戳，
+ * 直接就能看出哪一步吃了多少时间。
+ */
+export const getUniRigLog = (assetId: string, offset = 0, maxBytes = 256 * 1024) =>
+  get<UniRigLogResponse>(
+    `/v2/assets/${enc(assetId)}/unirig/log${query({ offset, max_bytes: maxBytes })}`)
 
 // --------------------------------------------------------------------------- //
 // 产物 URL（供 <img> / useGLTF / <a download> 直接使用）

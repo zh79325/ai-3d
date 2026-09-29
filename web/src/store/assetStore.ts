@@ -31,6 +31,7 @@ import type {
   AssetInfo,
   AssetKind,
   AssetSummary,
+  BindMethod,
   BindResponse,
   Conventions,
   ReskinResponse,
@@ -64,9 +65,9 @@ export interface AssetStoreState {
   realign: (assetId: string) => Promise<AlignResponse | null>
   confirm: (assetId: string, opts?: ConfirmOptions) => Promise<AssetInfo | null>
   /** 起 S2；后台线程跑，返回只代表「排上了」，进度靠轮询素材详情。 */
-  bind: (assetId: string, poseAi?: boolean) => Promise<BindResponse | null>
+  bind: (assetId: string, poseAi?: boolean, method?: BindMethod) => Promise<BindResponse | null>
   /** 重跑 S2（会覆写 rig.json，人工微调丢）。 */
-  rebind: (assetId: string, poseAi?: boolean) => Promise<BindResponse | null>
+  rebind: (assetId: string, poseAi?: boolean, method?: BindMethod) => Promise<BindResponse | null>
   /** 只重算蒙皮（关节微调后 skin.npz 与 rig.json 不同步时用）。 */
   reskin: (assetId: string) => Promise<ReskinResponse | null>
   remove: (assetId: string, force?: boolean) => Promise<boolean>
@@ -171,14 +172,16 @@ export const useAssetStore = create<AssetStoreState>((set, get) => {
       }),
     ),
 
-    bind: (assetId, poseAi = true) => mutate(
-      () => bindAsset(assetId, poseAi),
-      (res) => set({ notice: res.message || 'S2 绑定已开始' }),
+    bind: (assetId, poseAi = true, method = 'ai') => mutate(
+      () => bindAsset(assetId, poseAi, method),
+      (res) => set({ notice: res.message
+        || (method === 'unirig' ? 'UniRig 绑定已开始（CPU 推理，首次可能数分钟）' : 'S2 绑定已开始') }),
     ),
 
-    rebind: (assetId, poseAi = true) => mutate(
-      () => rebindAsset(assetId, poseAi),
-      (res) => set({ notice: res.message || 'S2 已重跑' }),
+    rebind: (assetId, poseAi = true, method = 'ai') => mutate(
+      () => rebindAsset(assetId, poseAi, method),
+      (res) => set({ notice: res.message
+        || (method === 'unirig' ? 'UniRig 已重跑（CPU 推理，首次可能数分钟）' : 'S2 已重跑') }),
     ),
 
     reskin: (assetId) => mutate(

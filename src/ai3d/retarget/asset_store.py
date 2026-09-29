@@ -16,6 +16,8 @@
     view_spec.json       S2 下发给前端的多视角渲染规格（三角化读同一份）
     detections.json      S2 多视角 2D 关键点推理结果
     views/               S2 前端回传的多视角图
+    unirig.log           S2 UniRig 链路的全部执行输出（前端按字节 offset 增量轮询）
+    unirig/              UniRig 中间产物（raw_data / predict_skeleton / predict_skin npz）
 
 状态机：``CREATED → NORMALIZING → ALIGN_READY → READY``，任一步失败落 ``FAILED``。
 ``ALIGN_READY`` 是 S2 的硬性准入门槛（见 :meth:`AssetStore.require_align_ready`）。
@@ -47,6 +49,12 @@ SKIN_REPORT_FILE = "skin_report.json"
 DETECTIONS_FILE = "detections.json"
 VIEW_SPEC_FILE = "view_spec.json"
 VIEWS_DIR = "views"
+UNIRIG_LOG_FILE = "unirig.log"
+UNIRIG_WORK_DIR = "unirig"
+
+# 单次日志增量拉取的字节上限（前端可用 max_bytes 覆盖）：推理几分钟能刷出几 MB，
+# 一次全塞给浏览器会卡住页面，故按 offset 分片、前端只留尾部
+LOG_CHUNK_BYTES = 256 * 1024
 
 # 视角图只收这几种扩展名（与 inference.list_view_images 的可读集一致）
 VIEW_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
@@ -131,6 +139,14 @@ class AssetStore:
 
     def skin_report_path(self, asset_id: str) -> Path:
         return self.asset_dir(asset_id) / SKIN_REPORT_FILE
+
+    def unirig_log_path(self, asset_id: str) -> Path:
+        """UniRig 链路的全部执行输出（``unirig.log_capture`` 写入，覆盖式）。"""
+        return self.asset_dir(asset_id) / UNIRIG_LOG_FILE
+
+    def unirig_work_dir(self, asset_id: str) -> Path:
+        """UniRig 中间产物目录（raw / 骨架 / 蒙皮 npz）。"""
+        return self.asset_dir(asset_id) / UNIRIG_WORK_DIR
 
     def binding_path(self, asset_id: str, name: str) -> Path:
         """S2 产物路径，``name`` 取 ``rig`` / ``skin`` / ``skin_report``。"""
@@ -464,6 +480,57 @@ class AssetStore:
             return []
         return sorted(p.name for p in vdir.iterdir()
                       if p.is_file() and p.suffix.lower() in VIEW_IMAGE_EXTS)
+
+    # ------------------------------------------------------------------ #
+    # S2 UniRig 执行日志（前端增量轮询看「跑到哪了」）
+    # ------------------------------------------------------------------ #
+    def read_unirig_log(self, asset_id: str, offset: int = 0,
+                        max_bytes: int = LOG_CHUNK_BYTES) -> Dict[str, Any]:
+        """从字节 ``offset`` 起读一段 UniRig 执行输出（增量轮询的唯一入口）。
+
+        返回体里的 ``offset`` 就是**下次请求该带的值**，前端不必自己累加字节数。
+        三个边界：
+
+        - 日志不存在（没跑过 UniRig）→ ``exists=false`` + 200，不当错：前端是在
+          绑定刚起步时就开始轮的，那时文件可能还没建；
+        - ``offset > size``（重跑把文件覆盖了）→ ``reset=true`` 并从头返回，
+          前端据此清空已渲染的旧输出；
+        - 剩余超过 ``max_bytes`` → 只返回一片、``truncated=true``，offset 照样往前推，
+          下轮接着拉（不丢中间输出，只是多轮几次）。
+
+        按**字节**读再 ``decode(errors="replace")``：offset 可能正切在一个中文字的
+        多字节序列中间，用文本模式 seek 会抛错或丢字。
+        """
+        self.require(asset_id)
+        path = self.unirig_log_path(asset_id)
+        row = self.get_binding(asset_id) or {}
+        state = row.get("state") or BindingState.NONE.value
+        base: Dict[str, Any] = {
+            "asset_id": asset_id,
+            "state": state,
+            "stage": row.get("stage"),
+            "message": row.get("message"),
+            "error": row.get("error"),
+            "running": state in (BindingState.RUNNING.value, BindingState.PENDING.value),
+        }
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return {**base, "exists": False, "size": 0, "offset": 0,
+                    "text": "", "reset": False, "truncated": False}
+        reset = offset > size or offset < 0
+        start = 0 if reset else int(offset)
+        try:
+            with path.open("rb") as fh:
+                fh.seek(start)
+                chunk = fh.read(max(1, int(max_bytes)))
+        except OSError as exc:
+            logger.warning("读 UniRig 日志失败 %s：%s", path, exc)
+            return {**base, "exists": True, "size": size, "offset": start,
+                    "text": "", "reset": reset, "truncated": False}
+        return {**base, "exists": True, "size": size, "offset": start + len(chunk),
+                "text": chunk.decode("utf-8", "replace"),
+                "reset": reset, "truncated": start + len(chunk) < size}
 
     # ------------------------------------------------------------------ #
     # 作业引用 / 删除

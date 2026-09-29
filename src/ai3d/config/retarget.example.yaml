@@ -51,6 +51,14 @@ skin:
   max_handles: 22
   bbw_max_verts: 30000
 
+# UniRig 骨架蒙皮新链路（POST /v2/assets/{id}/bind?method=unirig 才走；CPU 进程内推理，
+# 需先跑 scripts/setup_unirig.py 与 scripts/download_models.py --unirig）
+unirig:
+  enabled: true
+  threads: 0                 # torch CPU 线程数；0 = 自动取核数
+  seed: 12345
+  timeout_s: 3600            # 骨架/蒙皮单阶段各自的上限
+
 # 源骨映射
 mapping:
   name_weight: 1.0

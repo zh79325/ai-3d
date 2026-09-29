@@ -64,6 +64,11 @@ retarget = [
     "pydantic>=2.0",
 ]
 
+# torch_scatter/torch_cluster 在 macOS arm64 无 wheel，须源码编译；
+# 其 setup.py 在构建期 import torch 但未声明 build 依赖，必须关闭构建隔离
+[tool.uv]
+no-build-isolation-package = ["torch-scatter", "torch-cluster"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

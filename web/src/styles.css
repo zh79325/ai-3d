@@ -200,3 +200,14 @@ table.grid select { padding: 4px 6px; }
   padding: 4px 0; border-bottom: 1px dashed transparent;
 }
 .subtle-link:hover { border-bottom-color: var(--acc); }
+
+/* ---- UniRig 执行输出面板 ---- */
+/* 头部不用 .row：那里的 `> * { flex:1 }` 会把按钮拉成等宽，标题就没地方待了 */
+.loghead { display: flex; align-items: center; gap: 6px; }
+.loghead .spacer { flex: 1; }
+.logbox {
+  margin: 0; padding: 8px; height: 220px; overflow-y: auto;
+  background: var(--input); border: 1px solid var(--line); border-radius: 6px;
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
+  color: var(--fg); white-space: pre-wrap; word-break: break-all; tab-size: 4;
+}

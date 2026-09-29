@@ -1,0 +1,32 @@
+# UniRig 蒙皮预测 CPU 任务配置（复制自 configs/task/quick_inference_unirig_skin.yaml）。
+# 差异：trainer 改 CPU/fp32；ckpt 指本地离线权重；writer 关掉 FBX 导出（不装 bpy）。
+# resume_from_checkpoint 为「相对项目根」路径，由 src/ai3d/retarget/unirig/predict.py
+# 运行时 resolve 成绝对路径后覆写，勿依赖 cwd。
+mode: predict
+debug: False
+experiment_name: quick_inference_skin
+resume_from_checkpoint: models/unirig/skin_articulationxl.ckpt
+
+components:
+  data: quick_inference
+  transform: inference_skin_transform
+  model: unirig_skin
+  system: skin
+  data_name: predict_skeleton.npz # capture data from ar phase
+
+writer:
+  __target__: skin
+  output_dir: ~ # export results into the same input folder（必须为 ~：datapath 传绝对路径）
+  add_num: False
+  repeat: 1
+  save_name: predict
+  export_npz: predict_skin # this must be specified if textured results are required
+  export_fbx: ~ # 不装 bpy，跳过 FBX；消费 npz
+
+trainer:
+  num_nodes: 1
+  devices: 1
+  precision: 32
+  accelerator: cpu
+  strategy: auto
+  inference_mode: True

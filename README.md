@@ -78,6 +78,8 @@ launch_viewer('input.mp4', port=8765)
 
 > 💡 **离线使用**: DWPose 与 YOLO26 模型已预下载到 `models/` 目录,无需网络连接即可运行。详见 [OFFLINE_USAGE.md](OFFLINE_USAGE.md)。
 
+> 🦴 **UniRig 骨架蒙皮新链路**: S2 绑定新增 `method=unirig` —— 用 UniRig 学习模型在 **CPU 进程内**直接推骨架+蒙皮,产物与旧链路同契约,旧链路零改动。首次需 `scripts/setup_unirig.py` + `scripts/download_models.py --unirig` 两步联网准备(权重落 `models/unirig/`,vendored 仓库落 `third_party/UniRig`),之后完全离线。详见 [OFFLINE_USAGE.md](OFFLINE_USAGE.md)。
+
 ### 完整功能 (开发中)
 
 ```python

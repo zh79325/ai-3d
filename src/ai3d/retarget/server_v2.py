@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__, glb_io
 from .asset_store import (
+    LOG_CHUNK_BYTES,
     AssetStore,
     ConflictError,
     NotFoundError,
@@ -40,7 +41,13 @@ from .asset_worker import (
     get_asset_worker,
 )
 from .axis_norm import ALIGN_VERSION
-from .job_worker import BindingError, BindingInputError, JobWorker, get_job_worker
+from .job_worker import (
+    BIND_METHODS,
+    BindingError,
+    BindingInputError,
+    JobWorker,
+    get_job_worker,
+)
 from .obb import FACE_LABELS
 from .schemas import DEFAULT_CAMERAS, CameraSpec, HealthResponse, RigPatch, ViewSpec
 from .schemas_v2 import (
@@ -120,15 +127,15 @@ def _run_align(asset_id: str, patch: Optional[AlignPatch]) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"导入矫正失败：{exc}") from exc
 
 
-def _start_binding(asset_id: str, pose_ai: bool) -> JSONResponse:
+def _start_binding(asset_id: str, pose_ai: bool, method: str = "ai") -> JSONResponse:
     """启动 S2 并把领域异常翻成 HTTP 状态码。
 
     准入校验（素材存在 / 是模型 / S1 已落库 / 未在跑）在 :meth:`JobWorker.start_binding`
     里是**同步**做的，故这里能把错误当场回给前端：``BindingInputError``（动画素材、
-    缺产物）→ 400，``StateError``（S1 未完成、已有 S2 在跑）→ 409。
+    缺产物、UniRig 环境未就绪）→ 400，``StateError``（S1 未完成、已有 S2 在跑）→ 409。
     """
     try:
-        _job_worker().start_binding(asset_id, pose_ai=pose_ai)
+        _job_worker().start_binding(asset_id, pose_ai=pose_ai, method=method)
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"素材不存在：{exc}") from exc
     except BindingInputError as exc:
@@ -137,6 +144,7 @@ def _start_binding(asset_id: str, pose_ai: bool) -> JSONResponse:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     info = _store().binding_info(asset_id)
     return JSONResponse({"status": "started", "asset_id": asset_id, "pose_ai": pose_ai,
+                         "method": method,
                          "binding": info.model_dump(mode="json"),
                          "message": "S2 绑定已启动，轮询素材详情看进度"})
 
@@ -454,23 +462,34 @@ async def get_binding(asset_id: str) -> JSONResponse:
 async def bind(
     asset_id: str,
     pose_ai: bool = Query(True, description="false = 跳过 DWPose，直接按人体比例生骨架"),
+    method: str = Query("ai", description="ai=多视角(默认,旧链路) / bbox=比例骨架 / unirig=UniRig CPU 新链路"),
 ) -> JSONResponse:
     """启动 S2 绑定（后台线程）。
 
     ``pose_ai=true`` 时若视角图还没回传，S2 会停在 ``WAIT_VIEWS``（**不是失败**），等
     :func:`upload_views` 到达后自动续跑；``pose_ai=false`` 适合非人形道具，或 DWPose
     检不到人时的兜底（不需要视角图，直接跑完）。
+
+    ``method='unirig'`` 走 UniRig 学习模型 CPU 推理新链路（不需要视角图，分钟级），
+    产物契约与旧链路一致；``method='bbox'`` 等价于 ``pose_ai=false``。默认 ``'ai'``，
+    旧行为不变。
     """
     _require_asset(asset_id)
-    return _start_binding(asset_id, pose_ai)
+    if method not in BIND_METHODS:
+        raise HTTPException(status_code=400,
+                            detail=f"method 非法：{method}（可选 {'/'.join(BIND_METHODS)}）")
+    if method == "bbox":
+        pose_ai = False
+    return _start_binding(asset_id, pose_ai, method)
 
 
 @router.post("/assets/{asset_id}/rebind")
 async def rebind(
     asset_id: str,
     pose_ai: bool = Query(True, description="同 /bind"),
+    method: str = Query("ai", description="同 /bind"),
 ) -> JSONResponse:
-    """重跑 S2（换视角图、或上一次失败后重试），与 ``/bind`` 同一实现。
+    """重跑 S2（换视角图、换绑定方法、或上一次失败后重试），与 ``/bind`` 同一实现。
 
     保留独立路径是为了语义清晰：``rebind`` 会**重写 ``rig.json``**（人工微调的关节与
     revision 归零），前端应给二次确认；只想换蒙皮请用 ``PATCH /rig?reskin=true``。
@@ -478,7 +497,12 @@ async def rebind(
     未绑定状态。
     """
     _require_asset(asset_id)
-    return _start_binding(asset_id, pose_ai)
+    if method not in BIND_METHODS:
+        raise HTTPException(status_code=400,
+                            detail=f"method 非法：{method}（可选 {'/'.join(BIND_METHODS)}）")
+    if method == "bbox":
+        pose_ai = False
+    return _start_binding(asset_id, pose_ai, method)
 
 
 # --------------------------------------------------------------------------- #
@@ -491,7 +515,9 @@ async def get_rig(asset_id: str) -> JSONResponse:
     rig = _store().load_binding_json(asset_id, "rig")
     if rig is None:
         raise HTTPException(status_code=404, detail="rig.json 尚未生成，请先跑完 S2")
-    return JSONResponse(rig)
+    # 产物会被原地重写（重绑 / 重适配 / reskin），无禁缓存头时浏览器 heuristic
+    # 缓存会把旧骨架还给前端（revision 不变时前端连 bust 的机会都没有）
+    return JSONResponse(rig, headers={"Cache-Control": "no-store"})
 
 
 @router.patch("/assets/{asset_id}/rig")
@@ -536,7 +562,7 @@ async def get_skin_report(asset_id: str) -> JSONResponse:
     report = _store().load_binding_json(asset_id, "skin_report")
     if report is None:
         raise HTTPException(status_code=404, detail="蒙皮报告尚未生成，请先跑完 S2")
-    return JSONResponse(report)
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/assets/{asset_id}/reskin")
@@ -558,6 +584,35 @@ async def reskin_asset(asset_id: str) -> JSONResponse:
     return JSONResponse({"status": "started", "asset_id": asset_id, "reskin": True,
                          "binding": _store().binding_info(asset_id).model_dump(mode="json"),
                          "message": "已排队重算蒙皮，轮询素材详情看进度"})
+
+
+# --------------------------------------------------------------------------- #
+# S2 UniRig 执行日志（实时看「跑到哪了」）
+# --------------------------------------------------------------------------- #
+@router.get("/assets/{asset_id}/unirig/log")
+async def get_unirig_log(
+    asset_id: str,
+    offset: int = Query(0, ge=0, description="上次响应里的 offset；0 = 从头读"),
+    max_bytes: int = Query(LOG_CHUNK_BYTES, ge=1024, le=4 * 1024 * 1024,
+                           description="本次最多返回多少字节（剩下的下轮接着拉）"),
+) -> JSONResponse:
+    """增量拉取 ``<asset_dir>/unirig.log``：UniRig 推理的全部执行输出。
+
+    UniRig 一次推理好几分钟（实测骨架 ~220s、蒙皮 ~25s），``bindings.stage`` 只有
+    ``UNIRIG_EXTRACT/SKELETON/SKIN/ADAPT`` 四个粗粒度值，根本看不出是在加载权重、
+    在跑 batch 还是已经卡死。故把 Lightning 进度条 / print / logging / 失败 traceback
+    全量落盘（``unirig.log_capture``，按线程分流不污染其它请求），本接口按字节 offset
+    分片吐给前端轮询。
+
+    响应里的 ``offset`` 就是下次请求该带的值；``reset=true`` 表示文件被重跑覆盖了，
+    已从头返回（前端要清空已渲染的旧输出）；``running`` 告知是否还在写 —— 跑完后
+    前端再拉一次收尾即可停轮询。日志不存在不算错（``exists=false`` + 200）：
+    前端在绑定刚起步时就开始轮了，那时文件可能还没建。
+    """
+    _require_asset(asset_id)
+    payload = _store().read_unirig_log(asset_id, offset=offset, max_bytes=max_bytes)
+    # 日志是边跑边写的，绝不能缓存（同 HTML 页的教训：浏览器会用旧副本）
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 # --------------------------------------------------------------------------- #

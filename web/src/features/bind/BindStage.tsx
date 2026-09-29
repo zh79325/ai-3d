@@ -28,7 +28,7 @@ import {
   uploadViews,
   usePollAsset,
 } from '../../api/client'
-import type { JointPatch, RigDoc, SkinReport, ViewSpec } from '../../api/types'
+import type { BindMethod, JointPatch, RigDoc, SkinReport, ViewSpec } from '../../api/types'
 import { RigBones } from '../../components/three/BoneLines'
 import { GlbModel, type ModelBounds } from '../../components/three/GlbModel'
 import { GHOST_LEVELS, type GhostLevel } from '../../components/three/GhostMaterial'
@@ -38,6 +38,7 @@ import { useAssetStore } from '../../store/assetStore'
 import { captureViews } from './captureViews'
 import { JointTable } from './JointTable'
 import { SkinReportPanel } from './SkinReportPanel'
+import { UniRigLogPanel } from './UniRigLogPanel'
 import { ViewsPanel } from './ViewsPanel'
 
 // 错误/加载态只渲染一个节点，要横跨 .shell 网格的两列，否则会挤在左栏宽度里
@@ -270,15 +271,15 @@ export function BindStage() {
     }
   }
 
-  async function onBind(poseAi: boolean) {
+  async function onBind(poseAi: boolean, method: BindMethod = 'ai') {
     if (!detail) return
     setProblem(null)
     const hasArtifacts = Boolean(binding?.has_rig)
     if (hasArtifacts
       && !window.confirm('重跑 S2 会覆写 rig.json，人工微调过的关节将丢失。继续？')) return
     const res = hasArtifacts
-      ? await rebind(detail.asset_id, poseAi)
-      : await bind(detail.asset_id, poseAi)
+      ? await rebind(detail.asset_id, poseAi, method)
+      : await bind(detail.asset_id, poseAi, method)
     if (res) {
       setSkinStale(false)
       setReloadToken((n) => n + 1)
@@ -395,14 +396,20 @@ export function BindStage() {
         <div className="card">
           <h3>绑定</h3>
           <div className="muted" style={{ marginBottom: 6 }}>
+            UniRig：学习模型直接在 CPU 上推骨架+蒙皮，不需多视角图（首次可能数分钟）。
             AI 路径：回传多视角 → DWPose 出 2D 关键点 → 三角化 → 蒙皮（人形最准）。
             比例路径：直接按包围盒的人体比例生骨架 → 蒙皮（非人形/道具，或检不到人时兜底）。
           </div>
           <div className="row">
+            <button disabled={!canBind} onClick={() => void onBind(true, 'unirig')}>
+              🧠 UniRig 绑定（CPU）
+            </button>
+          </div>
+          <div className="row" style={{ marginTop: 6 }}>
             <button disabled={!canBind} onClick={() => void onBind(true)}>
               🦴 AI 绑定（多视角）
             </button>
-            <button className="ghost" disabled={!canBind} onClick={() => void onBind(false)}>
+            <button className="ghost" disabled={!canBind} onClick={() => void onBind(false, 'bbox')}>
               📐 比例骨架绑定
             </button>
           </div>
@@ -419,6 +426,14 @@ export function BindStage() {
             <div className="muted" style={{ marginTop: 6 }}>{binding.message}</div>
           ) : null}
         </div>
+
+        {/* UniRig 一跑好几分钟且 stage 只有四个粗粒度值，靠日志面板才看得出「跑到哪了」 */}
+        <UniRigLogPanel
+          assetId={detail.asset_id}
+          running={running}
+          stage={binding?.stage ?? null}
+          defaultOpen={running}
+        />
 
         <ViewsPanel
           assetId={detail.asset_id}

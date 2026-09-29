@@ -1,6 +1,6 @@
 """
 Download models for offline use.
-下载 YOLO26 / DWPose 模型到本地,支持离线运行。
+下载 YOLO26 / DWPose / UniRig 模型到本地,支持离线运行。
 """
 
 import os
@@ -123,6 +123,60 @@ def download_dwpose_models(save_dir: str = "./models"):
     print("🎉 DWPose 模型准备完成,后续运行无需联网。")
 
 
+# UniRig 骨架/蒙皮新链路权重（HuggingFace）：两个 ckpt + OPT-350m 文本编码器。
+# 运行期由 predict.py 注入 HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1，仅读本地。
+UNIRIG_HF_FILES = [
+    {
+        "repo": "VAST-AI/UniRig",
+        "filename": "skeleton/articulation-xl_quantization_256/model.ckpt",
+        "target": "skeleton_articulationxl_256.ckpt",
+        "desc": "UniRig 骨架预测 ckpt (articulation-xl, 量化 256)",
+    },
+    {
+        "repo": "VAST-AI/UniRig",
+        "filename": "skin/articulation-xl/model.ckpt",
+        "target": "skin_articulationxl.ckpt",
+        "desc": "UniRig 蒙皮预测 ckpt (articulation-xl)",
+    },
+]
+
+
+def download_unirig_models(save_dir: str = "./models/unirig"):
+    """
+    下载 UniRig 骨架/蒙皮 ckpt 与 OPT-350m 到本地目录，下载后完全离线运行。
+
+    Args:
+        save_dir: 保存目录 (默认 ./models/unirig)
+    """
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"正在下载 UniRig 权重 (骨架/蒙皮 ckpt + opt-350m, 合计数 GB)")
+    print(f"保存路径: {save_dir}\n")
+
+    for item in UNIRIG_HF_FILES:
+        target_path = os.path.join(save_dir, item["target"])
+        if os.path.exists(target_path):
+            size_mb = os.path.getsize(target_path) / 1024 / 1024
+            print(f"⚠️  已存在,跳过: {item['target']} ({size_mb:.1f} MB)")
+            continue
+        print(f"⬇️  {item['desc']}: {item['repo']}/{item['filename']}")
+        cached = hf_hub_download(repo_id=item["repo"], filename=item["filename"])
+        shutil.copy2(cached, target_path)
+        size_mb = os.path.getsize(target_path) / 1024 / 1024
+        print(f"✅ 已保存: {target_path} ({size_mb:.1f} MB)\n")
+
+    opt_dir = os.path.join(save_dir, "opt-350m")
+    if os.path.exists(os.path.join(opt_dir, "config.json")):
+        print(f"⚠️  已存在,跳过: opt-350m/")
+    else:
+        print("⬇️  OPT-350m 文本编码器: facebook/opt-350m")
+        snapshot_download(repo_id="facebook/opt-350m", local_dir=opt_dir)
+        print(f"✅ 已保存: {opt_dir}\n")
+
+    print("🎉 UniRig 权重准备完成,后续运行无需联网。")
+
+
 def list_available_models():
     """列出可用的 YOLO26-pose 模型"""
     models = [
@@ -151,6 +205,11 @@ if __name__ == "__main__":
         help="下载 DWPose 133 点姿态所需的 det + pose ONNX 模型"
     )
     parser.add_argument(
+        "--unirig",
+        action="store_true",
+        help="下载 UniRig 骨架/蒙皮 ckpt 与 OPT-350m 到 ./models/unirig"
+    )
+    parser.add_argument(
         "--model", 
         type=str, 
         default="yolo26n-pose.pt",
@@ -172,6 +231,10 @@ if __name__ == "__main__":
     
     if args.list:
         list_available_models()
+    elif args.unirig:
+        download_unirig_models(
+            args.dir if args.dir != "./models" else "./models/unirig"
+        )
     elif args.dwpose:
         download_dwpose_models(args.dir)
     else:
