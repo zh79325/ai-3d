@@ -1,0 +1,177 @@
+/*
+ * 全局样式。配色与旧单页 HTML（retarget/viewer/index.html）保持一致，
+ * 过渡期两套界面并存时视觉不割裂；旧页下线后本文件成为唯一来源。
+ *
+ * 顶栏固定 48px —— 与 viewer/server.py 注入的 #__appnav 同高，
+ * 便于 React 页与旧页之间来回跳转时布局不跳动。
+ */
+:root {
+  --bg: #14161a;
+  --panel: #1e2229;
+  --panel2: #262b34;
+  --input: #12151a;
+  --fg: #e6e8ec;
+  --mut: #9aa3b2;
+  --acc: #4da3ff;
+  --ok: #39d98a;
+  --warn: #ffb020;
+  --err: #ff5c5c;
+  --line: #313845;
+  --nav-h: 48px;
+  --side-w: 340px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+a { color: var(--acc); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---- 顶栏 ---- */
+.nav {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--nav-h);
+  z-index: 1000;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 14px;
+  background: rgba(15, 17, 21, .97);
+  border-bottom: 1px solid var(--panel2);
+  backdrop-filter: blur(10px);
+}
+.nav .brand {
+  display: flex; align-items: center; gap: 8px; margin-right: 20px;
+  font-size: 14px; font-weight: 700; color: var(--fg); white-space: nowrap; letter-spacing: .3px;
+}
+.nav .brand:hover { color: #fff; text-decoration: none; }
+.nav .tab {
+  display: flex; align-items: center; gap: 6px; padding: 0 16px; font-size: 13px;
+  color: var(--mut); border-bottom: 2px solid transparent;
+  transition: color .15s, background .15s;
+}
+.nav .tab:hover { color: var(--fg); background: rgba(255, 255, 255, .04); text-decoration: none; }
+.nav .tab.on { color: var(--acc); border-bottom-color: var(--acc); font-weight: 600; }
+.nav .spacer { flex: 1; }
+.nav .hint { display: flex; align-items: center; font-size: 11px; color: var(--mut); }
+
+/* ---- 主布局：顶栏下方，左栏 + 右主区 ---- */
+.shell { position: fixed; inset: var(--nav-h) 0 0 0; display: grid; grid-template-columns: var(--side-w) 1fr; }
+.side { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 14px; }
+.main { position: relative; overflow: hidden; }
+
+h1 { font-size: 15px; margin: 0 0 10px; letter-spacing: .3px; }
+h2 { font-size: 12px; color: var(--mut); text-transform: uppercase; letter-spacing: .8px; margin: 16px 0 6px; }
+h3 { font-size: 13px; margin: 0 0 6px; }
+
+.card { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+label { display: block; font-size: 12px; color: var(--mut); margin: 8px 0 3px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; }
+.row.tight > * { flex: 0 0 auto; }
+.muted { color: var(--mut); font-size: 11px; }
+.mono { font-family: ui-monospace, Menlo, monospace; }
+
+input[type=text], input[type=number], select, textarea {
+  width: 100%; padding: 7px 8px; background: var(--input); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--fg); font-size: 12px; font-family: inherit;
+}
+input[type=file] {
+  width: 100%; padding: 5px; background: var(--input); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--fg); font-size: 12px;
+}
+input:disabled, select:disabled { opacity: .5; }
+
+button {
+  cursor: pointer; border: none; border-radius: 6px; padding: 8px 12px; font-size: 13px;
+  background: var(--acc); color: #08111f; font-weight: 600; font-family: inherit;
+}
+button.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); font-weight: 400; }
+button.danger { background: transparent; color: var(--err); border: 1px solid var(--err); font-weight: 400; }
+button.on { background: var(--acc); color: #081018; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.sm { padding: 4px 8px; font-size: 12px; }
+
+/* ---- 状态徽标 ---- */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.b-CREATED { background: #2a2f3a; color: var(--mut); }
+.b-NORMALIZING, .b-QUEUED, .b-RUNNING, .b-PENDING { background: #2a3550; color: #8fb6ff; }
+.b-ALIGN_READY, .b-WAITING, .b-WAIT_VIEWS, .b-NEEDS_REVIEW { background: #3a3320; color: var(--warn); }
+.b-READY, .b-DONE { background: #173a2a; color: var(--ok); }
+.b-FAILED { background: #3a1c1c; color: var(--err); }
+.b-NONE { background: #2a2f3a; color: #5b6472; }
+
+/* ---- 列表项 ---- */
+.item {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 7px 8px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.item:hover { background: var(--input); }
+.item.on { background: var(--input); border-color: var(--line); }
+.item .grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .del {
+  padding: 2px 6px; font-size: 12px; line-height: 1; color: var(--mut);
+  background: transparent; border: 1px solid var(--line); border-radius: 5px;
+}
+.item .del:hover { color: var(--err); border-color: var(--err); }
+
+/* ---- 提示条 ---- */
+.note { border-radius: 6px; padding: 7px 9px; font-size: 12px; margin: 8px 0; line-height: 1.5; }
+.note.err { background: #3a1c1c; color: #ffb4b4; border: 1px solid #5c2b2b; }
+.note.warn { background: #3a3320; color: #ffd79a; border: 1px solid #5c4d24; }
+.note.ok { background: #173a2a; color: #a6f0cd; border: 1px solid #235c3f; }
+.note.info { background: #1d2735; color: #b9d3f2; border: 1px solid #2b3b52; }
+
+/* ---- 表格（面映射等） ---- */
+table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.grid th, table.grid td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+table.grid th { color: var(--mut); font-weight: 400; font-size: 11px; }
+table.grid td.num { text-align: right; font-family: ui-monospace, Menlo, monospace; }
+table.grid select { padding: 4px 6px; }
+
+/* ---- 3D 视口 ---- */
+.viewport { position: absolute; inset: 0; }
+.viewport canvas { display: block; }
+.overlay {
+  position: absolute; left: 12px; top: 12px; max-width: 360px; z-index: 5;
+  background: rgba(20, 22, 26, .82); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(6px); pointer-events: none;
+}
+.toolbar {
+  position: absolute; right: 12px; top: 12px; z-index: 5; display: flex; gap: 6px;
+  background: rgba(20, 22, 26, .82); border: 1px solid var(--line); border-radius: 8px; padding: 6px;
+}
+.toolbar button { padding: 6px 10px; font-size: 12px; }
+
+/* 3D 场景里的面编号标签（drei Html）：不吃鼠标事件，避免挡住 OrbitControls */
+.face-tag {
+  pointer-events: none; user-select: none; white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 700;
+  padding: 1px 5px; border-radius: 4px;
+  background: rgba(20, 22, 26, .8); border: 1px solid var(--line); color: var(--mut);
+  transform: translate(-50%, -50%);
+}
+.face-tag.up { color: #08111f; background: var(--ok); border-color: var(--ok); }
+.face-tag.front { color: #08111f; background: var(--acc); border-color: var(--acc); }
+.face-tag.left { color: #08111f; background: var(--warn); border-color: var(--warn); }
+
+.spin {
+  display: inline-block; width: 11px; height: 11px; border: 2px solid var(--mut);
+  border-top-color: var(--acc); border-radius: 50%; animation: sp .8s linear infinite; vertical-align: -1px;
+}
+@keyframes sp { to { transform: rotate(360deg); } }
+
+.empty { padding: 40px 20px; text-align: center; color: var(--mut); font-size: 12px; }

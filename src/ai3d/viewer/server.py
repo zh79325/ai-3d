@@ -43,31 +43,38 @@ _NAV_STYLE = """<style id="__appnav_style">
 #__appnav .spacer{flex:1;}
 </style>"""
 
-# 各功能页的根布局选择器：注入导航后把主布局下移，避免被固定导航遮挡
+# 各功能页的根布局选择器：注入导航后把主布局下移，避免被固定导航遮挡。
+# React 版（/app）由 StaticFiles 直接吐 dist/index.html，不经过 _inject_nav，
+# 它自己渲染同高的 48px 顶栏，故这里没有它的条目。
 _PAGE_ROOT = {"skeleton": ".main-layout", "retarget": "#app"}
 
 
-def _nav_html(active: str) -> str:
+def _nav_html(active: str, react_ok: bool = True) -> str:
     def cls(key: str) -> str:
         return " __active" if key == active else ""
+    react = (
+        f'<a class="tab{cls("react")}" href="/app/">\u269b\ufe0f \u65b0\u7248\uff08React\uff09</a>'
+        if react_ok else ""
+    )
     return (
         '<div id="__appnav">'
         '<a class="brand" href="/" title="返回功能菜单">\U0001f9ca AI 3D 工具集</a>'
         f'<a class="tab{cls("skeleton")}" href="/api/skeleton-viewer/viewer">\U0001f3ac 骨骼查看器</a>'
         f'<a class="tab{cls("retarget")}" href="/retarget">\U0001f9b4 动画迁移</a>'
+        f'{react}'
         '<span class="spacer"></span>'
         '</div>'
     )
 
 
-def _inject_nav(html: str, active: str) -> str:
+def _inject_nav(html: str, active: str, react_ok: bool = True) -> str:
     """注入固定在顶部的导航栏，并把页面主布局下移到导航下方。"""
     root = _PAGE_ROOT.get(active)
     fix = ""
     if root:
         fix = (f"<style>{root}{{position:fixed!important;top:{_NAV_HEIGHT}px;"
                f"left:0;right:0;bottom:0;height:auto!important;margin:0!important;}}</style>")
-    snippet = _NAV_STYLE + fix + _nav_html(active)
+    snippet = _NAV_STYLE + fix + _nav_html(active, react_ok)
     if "</body>" in html:
         return html.replace("</body>", snippet + "</body>", 1)
     return html + snippet
@@ -111,6 +118,12 @@ _MENU_HTML = """<!DOCTYPE html>
   <div class="title">\U0001f9ca AI 3D \u5de5\u5177\u96c6</div>
   <div class="sub">\u9009\u62e9\u4e00\u4e2a\u529f\u80fd\u5f00\u59cb</div>
   <div class="grid">
+    <a class="card __APP_CLS__" href="__APP_HREF__">
+      <div class="icon">\u269b\ufe0f</div>
+      <h3>\u52a8\u753b\u8fc1\u79fb \u00b7 \u65b0\u7248\uff08React\uff09</h3>
+      <p>\u7d20\u6750\u5e93 + \u56db\u9636\u6bb5\u6d41\u7a0b\uff08\u5bfc\u5165\u77eb\u6b63 / \u7ed1\u5b9a / \u91cd\u5b9a\u5411 / \u5bfc\u51fa\uff09\uff1b\u52a8\u753b\u5165\u5e93\u540e\u53ef\u88ab\u4efb\u610f\u6a21\u578b\u590d\u7528\u3002</p>
+      __APP_NOTE__
+    </a>
     <a class="card" href="/api/skeleton-viewer/viewer">
       <div class="icon">\U0001f3ac</div>
       <h3>\u9aa8\u9abc\u67e5\u770b\u5668</h3>
@@ -128,13 +141,26 @@ _MENU_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-def _render_menu(retarget_ok: bool = True) -> str:
+def _render_menu(retarget_ok: bool = True, react_ok: bool = False) -> str:
+    """渲染根路径的功能菜单。
+
+    两个开关分别对应旧版动画迁移路由与 React 前端产物是否可用；不可用时卡片置灰
+    并写明原因 —— React 侧最常见的是没跑 ``npm run build``（``web/dist`` 不存在）。
+    """
     href = "/retarget" if retarget_ok else "#"
     cls = "" if retarget_ok else "disabled"
     note = "" if retarget_ok else "<p class='soon'>\u26a0\ufe0f \u672a\u6302\u8f7d\uff08retarget \u4f9d\u8d56\u4e0d\u53ef\u7528\uff09</p>"
+    app_href = "/app/" if react_ok else "#"
+    app_cls = "" if react_ok else "disabled"
+    app_note = "" if react_ok else (
+        "<p class='soon'>\u26a0\ufe0f \u524d\u7aef\u672a\u6784\u5efa\uff0c"
+        "\u8bf7\u5728 web/ \u6267\u884c npm run build</p>"
+    )
     html = (_MENU_HTML.replace("__RT_HREF__", href)
-            .replace("__RT_CLS__", cls).replace("__RT_NOTE__", note))
-    return _inject_nav(html, "")
+            .replace("__RT_CLS__", cls).replace("__RT_NOTE__", note)
+            .replace("__APP_HREF__", app_href)
+            .replace("__APP_CLS__", app_cls).replace("__APP_NOTE__", app_note))
+    return _inject_nav(html, "", react_ok)
 
 
 # 创建路由器
@@ -524,19 +550,25 @@ async def stream_annotated_video(task_id: str):
 
 
 # 独立运行时使用的完整应用
-def _mount_retarget(app) -> bool:
-    """把动画迁移工具（retarget）的 /v1 路由与前端页面挂到同一应用。
+def _mount_retarget(app, react_ok: bool = True) -> bool:
+    """把动画迁移工具（retarget）的 /v1 + /v2 路由与前端页面挂到同一应用。
 
+    两套 API 过渡期并存：``/v1`` 服务旧单页 HTML（一对一任务），``/v2`` 服务 React
+    前端（素材库 + 四阶段作业），各读写自己的表与目录。
+
+    ``react_ok`` 透传给注入的导航栏：React 产物缺失时不给「新版」入口，免得点开 404。
     失败时降级（仅骨骼查看器可用），不影响主服务启动。返回是否挂载成功。
     """
     try:
         from ai3d.retarget.server import VIEWER_DIR, router as retarget_router
+        from ai3d.retarget.server_v2 import router as retarget_v2_router
         from ai3d.retarget.settings import get_settings as retarget_settings
         from ai3d.retarget.task_store import get_store as retarget_store
 
         retarget_settings().ensure_dirs()
-        retarget_store()  # 触发建表
+        retarget_store()  # 触发建表（旧表 + /v2 新表一次建齐）
         app.include_router(retarget_router)
+        app.include_router(retarget_v2_router)
 
         @app.get("/retarget", include_in_schema=False)
         async def retarget_page():
@@ -544,7 +576,8 @@ def _mount_retarget(app) -> bool:
             if not html_path.exists():
                 return JSONResponse(status_code=404,
                                     content={"error": "retarget viewer/index.html 未找到"})
-            return _html_response(_inject_nav(html_path.read_text(encoding="utf-8"), "retarget"))
+            return _html_response(
+                _inject_nav(html_path.read_text(encoding="utf-8"), "retarget", react_ok))
 
         return True
     except Exception as exc:  # noqa: BLE001 - 降级：retarget 不可用时仍提供骨骼查看器
@@ -559,6 +592,8 @@ def create_app() -> "FastAPI":
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
 
+    from ai3d.config import PROJECT_ROOT
+
     app = FastAPI(
         title="AI 3D 工具集",
         description="3D 骨骼查看器 + FBX/GLB 骨骼动画迁移工具",
@@ -572,8 +607,12 @@ def create_app() -> "FastAPI":
     # 挂载骨骼查看器路由
     app.include_router(router)
 
+    # React 前端产物：web/dist 构建过才挂 /app，缺失时菜单页与导航栏都不给入口
+    web_dist = PROJECT_ROOT / "web" / "dist"
+    react_ok = (web_dist / "index.html").exists()
+
     # 挂载动画迁移工具（失败则降级）
-    retarget_ok = _mount_retarget(app)
+    retarget_ok = _mount_retarget(app, react_ok)
 
     # 挂载静态文件
     viewer_dir = Path(__file__).parent
@@ -581,11 +620,14 @@ def create_app() -> "FastAPI":
 
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    if react_ok:
+        # html=True 让目录请求回落 index.html；前端用 HashRouter，深链刷新也只请求 /app/
+        app.mount("/app", StaticFiles(directory=str(web_dist), html=True), name="react-app")
 
     # 根路径：功能切换菜单
     @app.get("/", include_in_schema=False)
     async def root():
-        return _html_response(_render_menu(retarget_ok))
+        return _html_response(_render_menu(retarget_ok, react_ok))
 
     return app
 
@@ -603,6 +645,7 @@ if __name__ == "__main__":
     print("功能菜单: http://localhost:8765/")
     print("  🎬 骨骼查看器:   http://localhost:8765/api/skeleton-viewer/viewer")
     print("  🦴 动画迁移工具: http://localhost:8765/retarget")
+    print("  \u269b\ufe0f 新版（React）:   http://localhost:8765/app/")
     print()
     print("API端点:")
     print("  POST /api/skeleton-viewer/load          - 加载动画数据")

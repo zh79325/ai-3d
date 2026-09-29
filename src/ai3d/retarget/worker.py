@@ -8,6 +8,9 @@ P2：POSE_INFER（DWPose/YOLO 多视角 2D 关键点）→ SOLVE_RIG（加权三
     BUILD_RIG 复用求解出的 rig.json 做蒙皮。
 
 运行方式：server 在后台线程调用 ``Worker.run_pipeline(task_id, from_stage)``。
+
+各阶段的算法编排已抽到 :mod:`stages`（纯函数，只认产物路径），``/v2`` 的
+:class:`job_worker.JobWorker` 共用同一份；本类只负责 ``/v1`` 的状态机与产物登记。
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-from . import foot_ik, glb_io, inference, solve
+from . import foot_ik, glb_io, stages
 from .glb_build import build_result_glb
 from .mapping import build_mapping
 from .retarget import (
@@ -34,15 +37,13 @@ from .retarget import (
 from .schemas import (
     STAGE_ORDER,
     ArtifactKind,
-    DEFAULT_CAMERAS,
     JobConfig,
     JobState,
     Stage,
     StageStatus,
 )
 from .settings import get_settings
-from .skeleton import JOINTS, Rig, generate_rig_from_bbox
-from .skinning import compute_skin_weights
+from .skeleton import JOINTS, Rig
 from .task_store import TaskStore, _job_config_from_json, get_store
 
 logger = logging.getLogger(__name__)
@@ -217,12 +218,8 @@ class Worker:
         views_path = s.get_artifact_path(task_id, ArtifactKind.VIEWS)
         if not views_path:
             raise RuntimeError("缺少视角图，无法推理（RENDER_VIEWS 未完成）")
-        estimator = inference.load_estimator(get_settings())
-        detections = inference.infer_views(views_path, estimator=estimator)
-        if not detections:
-            raise RuntimeError("视角图为空或无法读取，无法推理")
-        det_path = s.task_dir(task_id) / "detections.json"
-        det_path.write_text(json.dumps(detections, ensure_ascii=False), encoding="utf-8")
+        detections = stages.infer_views(
+            Path(views_path), s.task_dir(task_id) / stages.DETECTIONS_FILE)
         n_kp = sum(len(d) for d in detections.values())
         s.set_stage(task_id, Stage.POSE_INFER, StageStatus.RUNNING,
                     f"{len(detections)} 个视角推理完成，共 {n_kp} 个 2D 关键点")
@@ -231,27 +228,11 @@ class Worker:
     def _solve_rig(self, task_id: str) -> StepResult:
         """多视角加权三角化 + 对称/比例/骨长约束 → 三维关节，落盘 rig.json。"""
         s = self.store
-        settings = get_settings()
-        detections = s.load_json_artifact(task_id, "detections.json")
-        if not detections:
-            raise RuntimeError("缺少 detections.json，无法求解三维关节")
-        vs = s.load_json_artifact(task_id, "view_spec.json")
-        width, height = 512, 512
-        if vs:
-            width = int(vs.get("width", 512))
-            height = int(vs.get("height", 512))
-            cameras = {c["view_id"]: (float(c["azimuth"]), float(c["elevation"]))
-                       for c in vs.get("cameras", [])}
-        else:
-            cameras = {vid: (az, el) for (vid, az, el) in DEFAULT_CAMERAS}
-        tgt_glb = Path(s.get_artifact_path(task_id, ArtifactKind.TARGET))
-        bbox = glb_io.mesh_bbox(glb_io._load(tgt_glb))
-        rig = solve.solve_rig(detections, cameras, bbox["min"], bbox["max"],
-                              settings.solve, width, height)
-        rig_path = s.task_dir(task_id) / "rig.json"
-        rig_path.write_text(json.dumps(rig.to_dict(), ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-        s.register_artifact(task_id, ArtifactKind.RIG, rig_path)
+        d = s.task_dir(task_id)
+        rig = stages.solve_rig(
+            Path(s.get_artifact_path(task_id, ArtifactKind.TARGET)),
+            d / stages.DETECTIONS_FILE, d / stages.RIG_FILE, d / stages.VIEW_SPEC_FILE)
+        s.register_artifact(task_id, ArtifactKind.RIG, d / stages.RIG_FILE)
         s.update_task(task_id, overall_confidence=round(rig.overall_confidence(), 4))
         solved = sum(1 for j in JOINTS if rig.source.get(j) == "solved")
         s.set_stage(task_id, Stage.SOLVE_RIG, StageStatus.RUNNING,
@@ -307,37 +288,16 @@ class Worker:
     def _build_rig(self, task_id: str) -> StepResult:
         """生成语义骨架（比例/已求解）+ 自动蒙皮，落盘 rig.json 与 skin.npz。"""
         s = self.store
-        settings = get_settings()
-        tgt_glb = Path(s.get_artifact_path(task_id, ArtifactKind.TARGET))
-        g = glb_io._load(tgt_glb)
-        mesh = glb_io.merge_mesh(g)
-        if len(mesh["positions"]) == 0:
-            raise RuntimeError("目标网格无顶点，无法蒙皮")
-        rig_dict = s.load_json_artifact(task_id, "rig.json")
-        if rig_dict is not None:
-            rig = Rig.from_dict(rig_dict)
-        else:
-            p = mesh["positions"]
-            rig = generate_rig_from_bbox(p.min(0).tolist(), p.max(0).tolist(),
-                                         confidence=0.9)
-        joints_u16, weights_f32, skin_report = compute_skin_weights(
-            mesh["positions"], mesh["indices"], rig, settings.skin)
-        rig_path = s.task_dir(task_id) / "rig.json"
-        rig_path.write_text(json.dumps(rig.to_dict(), ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-        s.register_artifact(task_id, ArtifactKind.RIG, rig_path)
-        np.savez(s.task_dir(task_id) / "skin.npz",
-                 joints=joints_u16, weights=weights_f32)
-        (s.task_dir(task_id) / "skin_report.json").write_text(
-            json.dumps(skin_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        d = s.task_dir(task_id)
+        rig_dict = s.load_json_artifact(task_id, stages.RIG_FILE)
+        rig, n_verts, skin_report = stages.build_rig(
+            Path(s.get_artifact_path(task_id, ArtifactKind.TARGET)), d,
+            Rig.from_dict(rig_dict) if rig_dict else None)
+        s.register_artifact(task_id, ArtifactKind.RIG, d / stages.RIG_FILE)
         s.update_task(task_id, overall_confidence=round(rig.overall_confidence(), 4))
-        st = skin_report.get("strain", {})
-        cmp_ = skin_report.get("components", {})
         s.set_stage(task_id, Stage.BUILD_RIG, StageStatus.RUNNING,
-                    f"骨架 22 关节（height={rig.height:.3f}m）+ 蒙皮 {len(joints_u16)} 顶点"
-                    f"（zero={skin_report.get('zero_rows')}, "
-                    f"strain_max={st.get('max')}, fallback={cmp_.get('fallback')}, "
-                    f"proxy={cmp_.get('proxy')}）")
+                    f"骨架 {len(JOINTS)} 关节（height={rig.height:.3f}m）"
+                    f"+ 蒙皮 {n_verts} 顶点（{stages.skin_summary(skin_report)}）")
         return StepResult.CONTINUE
 
     def _map_source(self, task_id: str) -> StepResult:

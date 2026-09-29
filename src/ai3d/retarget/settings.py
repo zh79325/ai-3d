@@ -146,16 +146,32 @@ class RetargetSettings:
         return self.project_dir / "tasks"
 
     @property
+    def assets_dir(self) -> Path:
+        """``/v2`` 素材库根目录（与旧 ``tasks/`` 并存，互不读写）。"""
+        return self.project_dir / "assets"
+
+    @property
+    def jobs_dir(self) -> Path:
+        """``/v2`` 作业根目录（模型 × 动画）。"""
+        return self.project_dir / "jobs"
+
+    @property
     def sqlite_file(self) -> Path:
         return _resolve(self.database.sqlite_path)
 
     def task_dir(self, task_id: str) -> Path:
         return self.tasks_dir / task_id
 
+    def asset_dir(self, asset_id: str) -> Path:
+        return self.assets_dir / asset_id
+
+    def job_dir(self, job_id: str) -> Path:
+        return self.jobs_dir / job_id
+
     def ensure_dirs(self) -> None:
         """创建项目目录结构与数据库父目录。"""
         for d in (self.project_dir, self.data_dir, self.tasks_dir,
-                  self.sqlite_file.parent):
+                  self.assets_dir, self.jobs_dir, self.sqlite_file.parent):
             d.mkdir(parents=True, exist_ok=True)
 
     # ---- 加载 ----
@@ -233,6 +249,8 @@ class RetargetSettings:
                 "project_dir": str(self.project_dir),
                 "data_dir": str(self.data_dir),
                 "tasks_dir": str(self.tasks_dir),
+                "assets_dir": str(self.assets_dir),
+                "jobs_dir": str(self.jobs_dir),
             },
             "assimp": {"path": self.assimp.path},
             "gating": {

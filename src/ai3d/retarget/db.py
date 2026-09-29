@@ -1,7 +1,12 @@
 """SQLite 持久化层（标准库 sqlite3，无第三方 ORM）。
 
-职责：连接管理、建表、通用 CRUD 与事务封装。表：tasks / stages / artifacts。
-上层领域逻辑（任务生命周期、磁盘产物、revision 乐观锁）在 task_store.py。
+职责：连接管理、建表、通用 CRUD 与事务封装。
+
+两套表并存（``/v1`` 与 ``/v2`` 各读写自己的一套，旧库靠 ``IF NOT EXISTS`` 自动补新表）：
+- 旧（``/v1`` 一对一任务）：tasks / stages / artifacts，领域逻辑在 task_store.py。
+- 新（``/v2`` 四阶段）：assets / bindings / jobs / job_stages / job_artifacts，
+  领域逻辑在 asset_store.py。素材（模型/动画）与作业（模型 × 动画）拆开，
+  动画入库一次可被任意模型复用；bindings 缓存 S2 结果供模型资产复用。
 
 并发策略：WAL 日志 + 全局可重入锁串行化写；每次操作使用独立连接，避免跨线程复用。
 """
@@ -61,6 +66,80 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_stages_task ON stages(task_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+
+-- ---------------------------------------------------------------------------
+-- /v2 四阶段：素材库（assets + S2 结果缓存 bindings）与作业（jobs）
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS assets (
+    asset_id   TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,               -- 'model' | 'animation'
+    name       TEXT,
+    filename   TEXT,                        -- 上传原件名
+    asset_dir  TEXT,
+    state      TEXT NOT NULL,               -- CREATED/NORMALIZING/ALIGN_READY/READY/FAILED
+    align_json TEXT,                        -- align.json 全文（S1 唯一产物）
+    meta_json  TEXT,                        -- read_summary 等结构概要
+    error      TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bindings (
+    asset_id    TEXT PRIMARY KEY REFERENCES assets(asset_id) ON DELETE CASCADE,
+    state       TEXT NOT NULL,              -- PENDING/RUNNING/WAIT_VIEWS/READY/FAILED
+    stage       TEXT,                       -- 当前子步骤（RENDER_VIEWS/POSE_INFER/SOLVE_RIG/BUILD_RIG）
+    message     TEXT,                       -- 一行进度描述，前端直接展示
+    confidence  REAL,
+    revision    INTEGER NOT NULL DEFAULT 0, -- 人工微调关节的乐观锁
+    rig_path    TEXT,
+    skin_path   TEXT,
+    report_path TEXT,
+    error       TEXT,                       -- 失败原因（与 assets.error 分开：S1 与 S2 互不覆盖）
+    updated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id           TEXT PRIMARY KEY,
+    name             TEXT,
+    model_asset_id   TEXT NOT NULL REFERENCES assets(asset_id) ON DELETE CASCADE,
+    anim_asset_id    TEXT REFERENCES assets(asset_id) ON DELETE SET NULL,
+    state            TEXT NOT NULL,
+    stage_group      TEXT,                  -- 'S1'|'S2'|'S3'|'S4'
+    current_stage    TEXT,                  -- 九阶段子步骤名
+    mapping_revision INTEGER NOT NULL DEFAULT 0,
+    review_reasons   TEXT,                  -- JSON list
+    error            TEXT,
+    job_dir          TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_stages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id      TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    stage       TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    message     TEXT,
+    started_at  TEXT,
+    finished_at TEXT,
+    seq         INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(job_id, stage)
+);
+
+CREATE TABLE IF NOT EXISTS job_artifacts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(job_id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_kind_created ON assets(kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_model ON jobs(model_asset_id);
+CREATE INDEX IF NOT EXISTS idx_job_stages_job ON job_stages(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_artifacts_job ON job_artifacts(job_id);
 """
 
 
@@ -71,6 +150,15 @@ def now_iso() -> str:
 
 class Database:
     """轻量 SQLite 封装。"""
+
+    # 后加列：(表, 列, 声明)。SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS，故先查 table_info；
+    # 建表语句里已含这些列，新库走 executescript，旧库走这里补齐。
+    _ADDED_COLUMNS = (
+        ("tasks", "name", "TEXT"),
+        ("bindings", "stage", "TEXT"),
+        ("bindings", "message", "TEXT"),
+        ("bindings", "error", "TEXT"),
+    )
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -102,10 +190,11 @@ class Database:
             self._migrate(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        """旧库轻量迁移：补建后加列（SQLite 不支持 IF NOT EXISTS 于 ADD COLUMN）。"""
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
-        if "name" not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN name TEXT")
+        """旧库轻量迁移：按 :data:`_ADDED_COLUMNS` 补建后加列（幂等）。"""
+        for table, column, decl in self._ADDED_COLUMNS:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # ---- 通用执行 ----
     def execute(self, sql: str, params: Sequence[Any] = ()) -> int:

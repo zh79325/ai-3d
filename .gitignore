@@ -58,3 +58,5 @@ Thumbs.db
 
 .qoder/*
 !.qoder/rules/
+web/node_modules/
+web/dist/

@@ -246,7 +246,9 @@ def _glb_response(task_id: str, kind: ArtifactKind, download_name: str) -> FileR
     path = _store().get_artifact_path(task_id, kind)
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail=f"{kind.value} 尚未生成")
-    return FileResponse(path, media_type=GLB_MEDIA, filename=download_name)
+    # 产物会被流水线/重跑覆盖：禁浏览器缓存，否则重上传/重跑后前端拿到旧字节
+    return FileResponse(path, media_type=GLB_MEDIA, filename=download_name,
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/jobs/{task_id}/target.glb")
@@ -425,6 +427,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router)
+    # /v2 四阶段路由（素材库 + 作业）与 /v1 并存；导入失败时降级为仅 /v1
+    try:
+        from .server_v2 import router as v2_router
+        app.include_router(v2_router)
+    except ImportError as exc:
+        logger.warning("/v2 路由未挂载（仅 /v1 可用）：%s", exc)
 
     @app.get("/", include_in_schema=False)
     async def root() -> HTMLResponse:

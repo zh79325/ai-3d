@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from . import glb_io
+from .axis_norm import CANON_NODE
 from .skeleton import JOINTS, Rig
 from .settings import RetargetConfig
 
@@ -202,9 +203,28 @@ def _global_rest_rotations(nodes: List[Dict[str, Any]]) -> Dict[int, np.ndarray]
     return cache
 
 
+def _canon_unit_scale(nodes: List[Dict[str, Any]]) -> float:
+    """场景根校正节点 ``canon_axis_root`` 的均匀缩放（无节点则 1.0）。
+
+    该缩放是 S1 的**单位换算**（cm/mm/inch → m），不是资产自带比例，故不能计入
+    :func:`_global_rest_positions` 的源身高（见其 docstring）。
+    """
+    for n in nodes:
+        if (n.get("name") or "") == CANON_NODE:
+            s = np.asarray(n.get("scale") or [1.0, 1.0, 1.0], dtype=np.float64)
+            return float(np.mean(s)) if s.size and float(np.mean(s)) > 0.0 else 1.0
+    return 1.0
+
+
 def _global_rest_positions(skin: Dict[str, Any],
                            nodes: List[Dict[str, Any]]) -> Dict[int, np.ndarray]:
-    """关节全局 rest 位置：优先用 inverseBindMatrix 求逆，缺失则沿层级累加。"""
+    """关节全局 rest 位置：优先用 inverseBindMatrix 求逆，缺失则沿层级累加。
+
+    **返回值的单位必须与动画通道的 translation 增量一致（即原始单位，非米制）**，
+    因为 ``retarget_animation`` 靠 ``height_scale = rig.height / src_height`` 同时承担
+    「源→目标身高比例」与「原始单位→米」两重换算：IBM 是资产导出时烘焙的，天然为
+    原始单位；层级累加路径会把 S1 插入的 canon 缩放算进去，故需显式除掉。
+    """
     joints = skin.get("joints") or []
     ibm = skin.get("inverse_bind_matrices")
     positions: Dict[int, np.ndarray] = {}
@@ -233,9 +253,10 @@ def _global_rest_positions(skin: Dict[str, Any],
             p, guard = parent.get(p), guard + 1
         return M
 
+    unit = _canon_unit_scale(nodes)
     for ni in joints:
         if 0 <= ni < len(nodes):
-            positions[ni] = gmat(ni)[:3, 3]
+            positions[ni] = gmat(ni)[:3, 3] / unit
     return positions
 
 

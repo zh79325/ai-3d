@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 _SYN_ANGLE = np.deg2rad(20.0)   # 合成自检姿势：每关节绕各世界轴的旋转角
 _SYN_MAX_EDGES = 50000          # 应变度量的采样边上限（高模控耗时）
+# 中轴链：躯干与头颈由脊柱驱动，皮肤归属按沿中轴的环形分带（高度区间）而非
+# “离哪根骨最近”；顺序即 pelvis→head 的解剖链，不得重排
+_AXIS_CHAIN = ("pelvis", "spine_01", "spine_02", "chest", "neck", "head")
 
 
 def _bone_segments(rig: Rig) -> List[Tuple[int, np.ndarray, np.ndarray]]:
@@ -84,17 +87,66 @@ def _components(F: np.ndarray, n: int) -> Tuple[int, np.ndarray]:
     return connected_components(A, directed=False)
 
 
-def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
+def _mean_edge_len(Vk: np.ndarray, Fk: np.ndarray) -> float:
+    """网格边长中位数（减面网格分布偏斜，中位数比均值稳）。"""
+    if len(Fk) == 0 or len(Vk) < 2:
+        return 0.0
+    e = np.concatenate([Fk[:, [0, 1]], Fk[:, [1, 2]], Fk[:, [2, 0]]], axis=0)
+    return float(np.median(np.linalg.norm(Vk[e[:, 0]] - Vk[e[:, 1]], axis=1)))
+
+
+def _axis_claim(Vk: np.ndarray, segs, D: np.ndarray, axis_idx: List[int],
+                gap: float) -> Dict[int, int]:
+    """中轴链（脊柱+头颈）沿中轴环形分带归属，返回 {顶点: 关节索引}。
+
+    躯干/头颈皮肤按沿中轴的高度区间整块归属对应骨（环形分界面保证前后左右
+    一致），横向由“离中轴不远离任何四肢骨”限定，肩部/四肢交给四肢骨。
+    不能用“离哪根骨最近”或骨段中段带：脊柱骨段短（实测 4~9cm），中段带仅
+    2~4cm 且在与锁骨竞争时大量败给 clear 判据，躯干会被锁骨/骨盆瓜分（实测
+    上背 clavicle 0.86、chest 0.06，表现为背部随肩臂拉扯扭曲）。
+    head 分界面下探半个头骨段长以覆盖下巴（下巴属头骨）；不用等距面（head/neck
+    两段共享端点，下巴到两段距离几乎相等、归属由列序决定）也不用前后半空间
+    （会把颈部前后劈开）；分界处留 gap 窄带由 BBW 谐波过渡。
+    """
+    a0 = segs[axis_idx[0]][1]                        # pelvis 关节
+    u = segs[axis_idx[-1]][1] - a0                    # pelvis→head 关节
+    lu = float(np.linalg.norm(u)) or 1e-9
+    u = u / lu
+    s = (Vk - a0) @ u                                 # 沿中轴高度坐标
+    bnd = np.array([(segs[j][1] - a0) @ u for j in axis_idx])
+    len_head = float(np.linalg.norm(segs[axis_idx[-1]][2] - segs[axis_idx[-1]][1])) or 1e-9
+    bnd[-1] -= 0.5 * len_head                         # head 下探盖下巴
+    d_axis = D[:, axis_idx].min(1)
+    limb = [j for j in range(D.shape[1]) if j not in set(axis_idx)]
+    d_limb = D[:, limb].min(1) if limb else np.full(len(Vk), np.inf)
+    inside = d_axis <= d_limb                         # 躯干/头颈区（非肩肢）
+    out: Dict[int, int] = {}
+    n_ax = len(axis_idx)
+    for i, ji in enumerate(axis_idx):
+        lo_b = bnd[i] if i > 0 else -np.inf
+        hi_b = bnd[i + 1] if i + 1 < n_ax else np.inf
+        span = hi_b - lo_b
+        # 过渡带不得超过环带长的 1/3，否则短环带（实测 chest 段仅 6.5cm）被上下
+        # gap 挤空，自由区过大时 head 谐波会向躯干扩散（实测胸前 head 0.31）；
+        # span 为负（head 下探越过 neck 关节）时自然得出空区间，该骨被跳过
+        g = min(gap, 0.3 * span) if np.isfinite(span) else gap
+        m = inside & (s >= (lo_b + g if i > 0 else -np.inf)) \
+            & (s < (hi_b - g if i + 1 < n_ax else np.inf))
+        for v in np.nonzero(m)[0]:
+            out[int(v)] = int(ji)
+    return out
+
+
+def _component_handles(Vk: np.ndarray, Fk: np.ndarray, segs, cfg: SkinConfig):
     """按骨段距离选 handle 骨，返回 [(约束顶点数组, 关节索引)]。
 
-    H = d_j <= d_min + handle_margin*分量对角 的骨（上限 max_handles）；每骨约束
-    顶点 = 骨段中段（投影参数 0.3~0.7）、贴近骨段、且明确胜出（d1 <= 0.8*d2）
-    的顶点；胯部/关节等距区留白由 BBW 谐波混合，避免两骨约束带相邻硬碰硬
-    产生权重断崖；末端骨（头/手/脚）约束带放宽到 t∈[0.2,1.35] 整块刚性带动，
-    且免除 clear 条件（面部/手指与父骨等距仍应刚性归属末端骨；竞争的非末端骨
-    在等距边界必败 clear，硬碰硬邻接仍不可能）；head 额外把 head 点与颈段之间
-    （t∈[0,0.2)）的前半空间（下巴/脸颊）刚性归 head，否则落入 head/neck 谐波
-    混合、chest 权重沿颈细管上传致面部滞后头旋转；无约束顶点时退化为离骨段中点最近顶点。
+    H = d_j <= d_min + handle_margin*分量对角 的骨（上限 max_handles，中轴链必含）。
+    约束顶点分两类：
+    ①中轴链（_AXIS_CHAIN）由 _axis_claim 沿中轴环形分带整块归属，优先锁定；
+    ②四肢骨：末端骨（手/脚）取骨段外侧延伸的整块刚性带（t∈[0.2,1.35]）免 clear，
+    其余取骨段中段带（t∈[0.3,0.7]）+ 明确胜出（d1 <= 0.8*d2），胯/腋等同级骨
+    等距区留白由 BBW 谐波混合，避免约束带相邻硬碰硬产生权重断崖。
+    无归属区的骨直接跳过（孤立硬点会制造断崖）；全部骨皆空时退化为质心最近骨单点。
     """
     D = _all_segment_distances(Vk, segs)                 # (nv, nj)
     dmin = D.min(axis=0)
@@ -102,6 +154,11 @@ def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
     thr = float(dmin.min()) + float(cfg.handle_margin) * diag
     order = np.argsort(dmin)
     picked = [int(j) for j in order if dmin[j] <= thr][: int(cfg.max_handles)]
+    axis_idx = [JOINT_INDEX[k] for k in _AXIS_CHAIN
+                if JOINT_INDEX[k] < len(segs) and JOINT_INDEX[k] not in picked]
+    picked += axis_idx                                   # 中轴链不得被 max_handles 截断
+    axis_set = {JOINT_INDEX[k] for k in _AXIS_CHAIN if JOINT_INDEX[k] < len(segs)}
+    axis_set_max = max(axis_set) if axis_set else 0
     if not picked:
         picked = [int(order[0])]
     Dp = D[:, picked]                                    # (nv, ns)
@@ -113,33 +170,47 @@ def _component_handles(Vk: np.ndarray, segs, cfg: SkinConfig):
         clear = np.ones(len(Vk), bool)
         nearest_sel = np.zeros(len(Vk), np.int64)
     band_r = dmin + 0.05 * diag                          # 中段带的贴骨距离上限
-    claim: Dict[int, Tuple[float, int]] = {}             # 顶点 -> (距离, 列)
+    all_true = np.ones(len(Vk), bool)
+    col_of = {ji: c for c, ji in enumerate(picked)}
+    claim: Dict[int, Tuple[float, int, bool]] = {}       # 顶点 -> (距离, 列, 中轴锁定)
+    # 分界过渡带按网格边长自适应：窄于边长时环带两侧顶点直接相邻，两个硬 1.0
+    # 行形成权重断崖（实测 pelvis 1.0 邻接 spine_01 1.0、weight_jump max 2.0）
+    lu = float(np.linalg.norm(segs[axis_set_max][1] - segs[min(axis_set)][1])) or 1e-9
+    gap = max(2.0 * _mean_edge_len(Vk, Fk), 0.02 * lu)
+    for v, ji in _axis_claim(Vk, segs, D, sorted(axis_set), gap).items():
+        c = col_of.get(int(ji))
+        if c is not None:
+            claim[v] = (0.0, c, True)
     for col, ji in enumerate(picked):
+        if ji in axis_set:                               # 中轴骨已由环形分带处理
+            continue
         a, b = segs[ji][1], segs[ji][2]
         ab = b - a
         l2 = float(ab @ ab)
         t = ((Vk - a) @ ab) / l2 if l2 > 1e-12 else np.zeros(len(Vk))
         if children_of(JOINTS[ji]):                      # 非末端骨：中段带 + clear
-            zone = (t >= 0.3) & (t <= 0.7) & (nearest_sel == col)
-            rad = band_r[ji]
-            ok_clear = clear
+            zone, rad, ok_clear = (t >= 0.3) & (t <= 0.7) & (nearest_sel == col), band_r[ji], clear
         else:                                            # 末端骨：整块刚性带，免 clear
             zone = (t >= 0.2) & (t <= 1.35) & (nearest_sel == col)
-            rad = band_r[ji] + 0.03 * diag
-            ok_clear = np.ones(len(Vk), bool)
-            if JOINTS[ji] == "head":                     # 下巴区：前半空间刚性归 head
-                zone |= (t >= 0.0) & (t < 0.2) & ((Vk - a) @ np.array([0.0, 0.0, 1.0]) > 0)
+            rad, ok_clear = band_r[ji] + 0.03 * diag, all_true
         cand = np.nonzero(zone & (D[:, ji] <= rad) & ok_clear)[0]
-        if len(cand) == 0:                               # 退化：取离骨段中点最近顶点
-            mid = 0.5 * (a + b)
-            cand = np.array([int(np.argmin(np.linalg.norm(Vk - mid, axis=1)))])
+        if len(cand) == 0:
+            # 该骨在本分量无归属区：不作 handle。切勿退化为“离骨段中点最近的单个
+            # 顶点”，孤立硬点会与邻骨硬带相邻形成权重断崖（实测 weight_jump max 2.0）；
+            # 该骨旋转经 FK 累积仍作用于子骨
+            continue
         for v in cand:
             v = int(v)
+            if v in claim and claim[v][2]:                # 中轴已锁定，不得抢占
+                continue
             d = float(D[v, ji])
             if v not in claim or d < claim[v][0]:
-                claim[v] = (d, col)
+                claim[v] = (d, col, False)
+    if not claim:                                    # 极端退化：分量质心最近骨单点 handle
+        j0 = int(np.argmin(_all_segment_distances(Vk.mean(0, keepdims=True), segs)[0]))
+        return [(np.array([int(np.argmin(D[:, j0]))], np.int64), j0)]
     by_col: Dict[int, List[int]] = {}
-    for v, (_d, col) in claim.items():
+    for v, (_d, col, _lk) in claim.items():
         by_col.setdefault(col, []).append(v)
     return [(np.array(sorted(vs), np.int64), picked[col])
             for col, vs in sorted(by_col.items())]
@@ -339,7 +410,7 @@ def compute_skin_weights(positions: np.ndarray, indices: np.ndarray, rig: Rig,
         Vk = Vp[sk]
         Fk = loc[Fp[np.nonzero(lab[Fp[:, 0]] == k)[0]]] if len(Fp) else Fp
         Wk = None
-        handles = _component_handles(Vk, segs, cfg) if len(sk) >= 4 else []
+        handles = _component_handles(Vk, Fk, segs, cfg) if len(sk) >= 4 else []
         if handles:
             try:
                 Wk, pu, tr = _bbw_component(Vk, Fk, handles, cfg)
