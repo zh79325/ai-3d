@@ -209,5 +209,17 @@ table.grid select { padding: 4px 6px; }
   margin: 0; padding: 8px; height: 220px; overflow-y: auto;
   background: var(--input); border: 1px solid var(--line); border-radius: 6px;
   font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
-  color: var(--fg); white-space: pre-wrap; word-break: break-all; tab-size: 4;
+  color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4;
 }
+/* 悬浮窗形态：挂在 3D 视口右上（toolbar 下方），左栏宽度不够读日志行；
+   收起后只剩一条 header，不遮模型 */
+.logfloat {
+  position: absolute; right: 12px; top: 60px; z-index: 6;
+  width: min(460px, 46vw); max-height: calc(100% - 76px);
+  display: flex; flex-direction: column;
+  background: rgba(20, 22, 26, .88); backdrop-filter: blur(6px);
+}
+.logfloat .loghead { flex: 0 0 auto; }
+.logfloat .loghead h3 { font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logfloat .loghead button { flex: 0 0 auto; }
+.logfloat .logbox { flex: 1 1 auto; height: auto; min-height: 140px; max-height: 48vh; }

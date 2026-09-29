@@ -117,7 +117,7 @@ export function UniRigLogPanel({
   const lines = text ? text.split('\n').length : 0
 
   return (
-    <div className="card">
+    <div className="card logfloat">
       <div className="loghead">
         <h3 style={{ margin: 0 }}>🧠 UniRig 执行输出</h3>
         <span className={`badge ${running ? 'b-RUNNING' : 'b-NONE'}`}>

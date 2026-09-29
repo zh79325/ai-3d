@@ -427,14 +427,6 @@ export function BindStage() {
           ) : null}
         </div>
 
-        {/* UniRig 一跑好几分钟且 stage 只有四个粗粒度值，靠日志面板才看得出「跑到哪了」 */}
-        <UniRigLogPanel
-          assetId={detail.asset_id}
-          running={running}
-          stage={binding?.stage ?? null}
-          defaultOpen={running}
-        />
-
         <ViewsPanel
           assetId={detail.asset_id}
           views={binding?.views ?? []}
@@ -514,6 +506,15 @@ export function BindStage() {
           </button>
           <button className={showLabels ? 'on' : 'ghost'} onClick={() => setShowLabels((v) => !v)}>关节名</button>
         </div>
+
+        {/* 悬浮在 3D 视口右侧：左栏太窄，日志行会被折成竖排没法读；
+            UniRig 一跑好几分钟且 stage 只有四个粗粒度值，靠它才看得出「跑到哪了」 */}
+        <UniRigLogPanel
+          assetId={detail.asset_id}
+          running={running}
+          stage={binding?.stage ?? null}
+          defaultOpen={running}
+        />
       </section>
     </>
   )
