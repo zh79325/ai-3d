@@ -168,6 +168,15 @@ table.grid select { padding: 4px 6px; }
 .face-tag.front { color: #08111f; background: var(--acc); border-color: var(--acc); }
 .face-tag.left { color: #08111f; background: var(--warn); border-color: var(--warn); }
 
+/* 朝向二选确认（OrientationPanel）：radio + 文字横排，选中项高亮 */
+.choice {
+  display: flex; align-items: center; gap: 6px; margin: 0;
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+  font-size: 12px; color: var(--fg); cursor: pointer;
+}
+.choice:has(input:checked) { border-color: var(--acc); background: rgba(77, 163, 255, .12); }
+.choice input { margin: 0; }
+
 .spin {
   display: inline-block; width: 11px; height: 11px; border: 2px solid var(--mut);
   border-top-color: var(--acc); border-radius: 50%; animation: sp .8s linear infinite; vertical-align: -1px;

@@ -1,61 +1,42 @@
 /**
- * OBB 几何helper（three 侧）。
+ * 外切盒几何 helper（three 侧）。
  *
- * 后端 `align.json` 里的 `obb` 是在**原始模型坐标**下测的（`axis_norm.build_align`
- * 开头会 `_reset_canon` 复位旧的 canon 节点），而前端加载的 `asset.glb` 已经带上了
- * canon 节点的 `final.rotation` + `final.scale`。要把外切盒画在归一化后的模型上，
- * 必须先做同一个变换：`center' = s·R·center`、`axes' = R·axes`（单位向量，不受 s 影响）、
- * `extents' = s·extents`。
+ * 后端 `align.json` 里的 `bbox` 是**规范系米制 AABB**，且已在场景坐标下
+ * （`axis_norm.build_align` 先把顶点旋到规范朝向再乘 scale，与带 canon 节点的
+ * `asset.glb` 同坐标系），三轴恒为单位阵。故前端直接画，不再需要 V1 的
+ * `toSceneObb(rotation, scale)` 二次变换。
  *
- * 面编号与棱的生成顺序严格对齐后端 `obb.OBB.corners()/edges()/FACE_AXES`，
- * 这样角点索引与面序号在两侧语义一致。
+ * 面编号与棱的生成顺序严格对齐后端 `obb.OBB.corners()/edges()/FACE_LABELS`：
+ * `1=+X left, 2=-X right, 3=+Y up, 4=-Y down, 5=+Z front, 6=-Z back`。
  */
 import * as THREE from 'three'
 
-import type { Mat3, ObbDict } from '../../api/types'
+import type { BboxDict } from '../../api/types'
 
-/** 场景坐标系下的外切盒（已应用 canon 变换，可直接画）。 */
+/** 场景坐标系下的外切盒（三轴恒为单位阵，可直接画）。 */
 export interface SceneObb {
   center: THREE.Vector3
-  /** 三轴单位向量，按行；轴 i 与 `extents[i]` 对应。 */
+  /** 三轴单位向量，按行；轴 i 与 `extents[i]` 对应（规范系下恒为 XYZ）。 */
   axes: [THREE.Vector3, THREE.Vector3, THREE.Vector3]
   extents: THREE.Vector3
 }
 
-/** 面序号 1..6 → (轴索引, 符号)；与后端 `obb.FACE_AXES` 一致，不得重排。 */
+/** 面序号 1..6 → (轴索引, 符号)；与后端 `obb.FACE_LABELS` 行序一致，不得重排。 */
 export const FACE_AXES: ReadonlyArray<readonly [number, number]> = [
   [0, 1], [0, -1], [1, 1], [1, -1], [2, 1], [2, -1],
 ]
 
-/** 面序号 1..6 的对偶面（1↔2 / 3↔4 / 5↔6）。 */
-export const FACE_OPPOSITE: readonly number[] = [2, 1, 4, 3, 6, 5]
+const IDENTITY_AXES: [THREE.Vector3, THREE.Vector3, THREE.Vector3] = [
+  new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1),
+]
 
-function mat3ToMatrix4(rows: Mat3): THREE.Matrix4 {
-  // align.final.rotation 的行序是 [left(+X), up(+Y), front(+Z)]，即规范系基向量在
-  // 模型坐标下的表示；three 的 Matrix4.set 按行填，直接对应。
-  const m = new THREE.Matrix4()
-  m.set(
-    rows[0][0], rows[0][1], rows[0][2], 0,
-    rows[1][0], rows[1][1], rows[1][2], 0,
-    rows[2][0], rows[2][1], rows[2][2], 0,
-    0, 0, 0, 1,
-  )
-  return m
-}
-
-/** 把 `align.json` 的 obb 变换到场景坐标（canon 的旋转 + 统一缩放）。 */
-export function toSceneObb(obb: ObbDict, rotation?: Mat3 | null, scale = 1): SceneObb {
-  const axes = obb.axes.map((row) => new THREE.Vector3(row[0], row[1], row[2]).normalize()) as
-    [THREE.Vector3, THREE.Vector3, THREE.Vector3]
-  let center = new THREE.Vector3(obb.center[0], obb.center[1], obb.center[2])
-  const extents = new THREE.Vector3(obb.extents[0], obb.extents[1], obb.extents[2])
-  const s = Number.isFinite(scale) && scale > 0 ? scale : 1
-  if (rotation) {
-    const m = mat3ToMatrix4(rotation)
-    center = center.applyMatrix4(m)
-    for (const axis of axes) axis.applyMatrix4(m).normalize()
+/** 把 `align.json` 的 bbox 包成可直接绘制的 SceneObb（轴恒为单位阵）。 */
+export function toSceneObb(bbox: BboxDict): SceneObb {
+  return {
+    center: new THREE.Vector3(bbox.center[0], bbox.center[1], bbox.center[2]),
+    axes: IDENTITY_AXES.map((a) => a.clone()) as [THREE.Vector3, THREE.Vector3, THREE.Vector3],
+    extents: new THREE.Vector3(bbox.extents[0], bbox.extents[1], bbox.extents[2]),
   }
-  return { center: center.multiplyScalar(s), axes, extents: extents.multiplyScalar(s) }
 }
 
 /**

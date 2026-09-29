@@ -22,28 +22,26 @@ export type BindingState = 'NONE' | 'PENDING' | 'RUNNING' | 'WAIT_VIEWS' | 'READ
 /** 四阶段分组。 */
 export type StageGroup = 'S1' | 'S2' | 'S3' | 'S4'
 
-/** 面 → 语义轴映射的取值域，与后端 `axis_norm.FACE_SEMANTICS` 一致。 */
-export type FaceSemantic = 'up+' | 'up-' | 'front+' | 'front-' | 'left+' | 'left-'
-
-/** 面序号 1..6（`1=+axis0, 2=-axis0, 3=+axis1, 4=-axis1, 5=+axis2, 6=-axis2`）。 */
+/** 面序号 1..6（规范系外切盒：`1=+X left, 2=-X right, 3=+Y up, 4=-Y down, 5=+Z front, 6=-Z back`）。 */
 export type FaceId = 1 | 2 | 3 | 4 | 5 | 6
 
 export type Vec3 = [number, number, number]
 export type Mat3 = [Vec3, Vec3, Vec3]
 
-/** 最小体积有向包围盒：中心、三轴（模型坐标下的单位正交基，按行）、三轴全长。 */
-export interface ObbDict {
+/**
+ * 规范系（米制）轴对齐外切盒：中心 + 三轴全长。三轴恒为单位阵（AABB），
+ * 且已在场景坐标下（`build_align` 先旋到规范朝向再乘 scale），前端直接画，
+ * 不再需要 canon 的 rotation/scale 二次变换。
+ */
+export interface BboxDict {
   center: Vec3
-  axes: Mat3
   extents: Vec3
 }
 
-/** OBB 的一个面：法向（模型坐标）、所在局部轴标签、该轴全长。 */
-export interface AlignFace {
-  id: FaceId
-  normal: Vec3
-  extent_face: string
-  extent: number
+/** PCA 三主轴（模型坐标，特征值降序）；仅作调试展示与缺先验时的轴线证据。 */
+export interface PcaInfo {
+  eigenvalues: number[]
+  axes: Vec3[]
 }
 
 /** 一个候选单位：换算系数、换算后身高、与成人中值 1.75m 的对数距离（越小越可信）。 */
@@ -63,23 +61,25 @@ export interface AlignUnit {
   hint: string
 }
 
-/** 自动指派结果：由人形先验（骨架 pelvis→head / 网格脚端双簇间隙）吸附到 OBB 面。 */
+/**
+ * 自动校准结果：`up` / `forward` 为吸附到模型坐标轴的单位向量，`method` 标注
+ * 先验来源（skeleton / mesh / identity），`notes` 是探测过程的诊断说明。
+ */
 export interface AlignAuto {
-  up_face: FaceId | null
-  forward_face: FaceId | null
-  left_face: FaceId | null
   method: string
   notes: string[]
+  up: Vec3
+  forward: Vec3
 }
 
 /**
- * 人工修正段。`face_map` 为空即采用 `auto`；两项覆盖的**清除**用哨兵值
- * （`null` 已被占用为「不改」）：`height_override <= 0` 取消身高直填，
- * `unit_override = ""` 取消强制单位。
+ * 人工修正段。V2 下人工只能二选确认朝向（`front_flipped`）+ 覆盖单位/身高；
+ * 两项覆盖的**清除**用哨兵值（`null` 已被占用为「不改」）：`height_override <= 0`
+ * 取消身高直填，`unit_override = ""` 取消强制单位。
  */
 export interface AlignManual {
-  face_map: Record<string, FaceSemantic>
-  trim_euler: Vec3
+  /** 前后方向是否相反（true = 绕规范系 Y 轴转 180°）。 */
+  front_flipped: boolean
   unit_override: string | null
   height_override: number | null
 }
@@ -94,8 +94,8 @@ export interface AlignFinal {
 /** `align.json` 全文（S1 唯一产物）。 */
 export interface AlignDoc {
   version: number
-  obb: ObbDict | null
-  faces: AlignFace[]
+  pca: PcaInfo | null
+  bbox: BboxDict | null
   unit: AlignUnit
   auto: AlignAuto
   manual: AlignManual
@@ -106,7 +106,6 @@ export interface AlignDoc {
 export interface Conventions {
   align_version: number
   face_labels: string[]
-  face_semantics: FaceSemantic[]
   canonical_axes: { up: string; front: string; left: string }
   asset_states: AssetState[]
   asset_kinds: AssetKind[]
@@ -183,11 +182,11 @@ export interface AlignResponse {
 
 /**
  * `PATCH /v2/assets/{id}/align` 请求体。留 `undefined` 的字段表示不改该项；
- * `face_map` 为**整体替换**而非合并，且至少要指派两个不同语义轴（第三个由右手系导出）。
+ * `reset=true` 清空全部人工修正回到自动探测。人工能改的只有 `front_flipped` 二选
+ * 与单位/身高覆盖，校准基与外切盒每次由后端重测。
  */
 export interface AlignPatch {
-  face_map?: Record<string, FaceSemantic> | null
-  trim_euler?: number[] | null
+  front_flipped?: boolean | null
   unit_override?: string | null
   height_override?: number | null
   reset?: boolean

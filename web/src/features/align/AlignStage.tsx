@@ -1,42 +1,33 @@
 /**
  * S1 导入矫正页。
  *
- * 布局：左栏是「人工修正表单」（面映射 / 盒内微调 / 单位身高）+ 动作按钮，右栏是
- * 3D 视口（模型 + 最小体积外切盒 + 六面编号 + 规范系箭头）。用户要求的核心交互是
- * 「6 个面标上序号，直接编辑序号和对应面的映射关系，支持自由旋转查看，也能微调模型
- * 在长方体内的旋转角度」—— 前两点由 `BoundingBoxFaces` 的 Html 标签与 OrbitControls
- * 承担，第三点是 `trim_euler`。
+ * 布局：左栏是「人工修正表单」（朝向二选确认 / 单位身高）+ 动作按钮，右栏是
+ * 3D 视口（模型 + 规范系外切盒 + 六面语义标签 + 坐标轴箭头）。V2 下校准基由
+ * 后端语义先验自动组装（旋转恒为 90° 置换），人工只需二选确认「朝向正确 / 前后相反」。
  *
  * 表单是**草稿式**的：改动只落在本地 state，点「应用修正」才发一次 PATCH。后端每次
- * PATCH 都会在原始模型坐标下重测 OBB 并重写 canon 节点（`_reset_canon` 保证反复修正
+ * PATCH 都会在原始模型坐标下重测并重写 canon 节点（`_reset_canon` 保证反复修正
  * 不累积），所以频繁提交既慢又会让相机反复重取景。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { assetGlbUrl, usePollAsset } from '../../api/client'
-import type { FaceSemantic } from '../../api/types'
 import { AxisGizmo } from '../../components/three/AxisGizmo'
-import { BoundingBoxFaces } from '../../components/three/BoundingBoxFaces'
+import { BoundingBoxFaces, FACE_LABELS_FALLBACK } from '../../components/three/BoundingBoxFaces'
 import { GlbModel, type ModelBounds } from '../../components/three/GlbModel'
 import { GHOST_LEVELS, type GhostLevel } from '../../components/three/GhostMaterial'
 import { obbRadius, toSceneObb } from '../../components/three/obb'
 import { ViewerCanvas, type ViewFocus } from '../../components/three/ViewerCanvas'
 import { useAssetStore } from '../../store/assetStore'
-import {
-  FACE_LABELS_FALLBACK,
-  FaceMapEditor,
-  validateFaceMap,
-  type FaceMapDraft,
-} from './FaceMapEditor'
+import { OrientationPanel, type OrientationDraft } from './OrientationPanel'
 import { UnitPanel, type UnitDraft } from './UnitPanel'
 
-/** S1 表单草稿：面映射 + 微调角 + 单位覆盖。 */
-interface Draft extends FaceMapDraft, UnitDraft {}
+/** S1 表单草稿：朝向二选 + 单位覆盖。 */
+interface Draft extends OrientationDraft, UnitDraft {}
 
 const EMPTY_DRAFT: Draft = {
-  faceMap: {},
-  trim: [0, 0, 0],
+  frontFlipped: false,
   unitOverride: null,
   heightOverride: null,
 }
@@ -70,7 +61,7 @@ export function AlignStage() {
   const [showFaces, setShowFaces] = useState(true)
   const [showAxes, setShowAxes] = useState(true)
   const [ghost, setGhost] = useState<GhostLevel | null>(null)
-  /** 模型实际包围球：`align.obb` 为 null（凸包退化）时的取景兜底。 */
+  /** 模型实际包围球：`align.bbox` 为 null 时的取景兜底。 */
   const [bounds, setBounds] = useState<ModelBounds | null>(null)
   const fileInput = useRef<HTMLInputElement | null>(null)
   const onBounds = useCallback((next: ModelBounds) => setBounds(next), [])
@@ -88,8 +79,7 @@ export function AlignStage() {
       return
     }
     setDraft({
-      faceMap: { ...align.manual.face_map },
-      trim: [...(align.manual.trim_euler ?? [0, 0, 0])],
+      frontFlipped: Boolean(align.manual.front_flipped),
       unitOverride: align.manual.unit_override,
       heightOverride: align.manual.height_override,
     })
@@ -103,8 +93,8 @@ export function AlignStage() {
   )
 
   const focus: ViewFocus | null = useMemo(() => {
-    if (align?.obb) {
-      const sceneObb = toSceneObb(align.obb, align.final.rotation, align.final.scale)
+    if (align?.bbox) {
+      const sceneObb = toSceneObb(align.bbox)
       return {
         center: [sceneObb.center.x, sceneObb.center.y, sceneObb.center.z],
         radius: Math.max(obbRadius(sceneObb), 0.05),
@@ -115,15 +105,9 @@ export function AlignStage() {
   }, [align, bounds])
 
   async function onApply() {
-    const invalid = validateFaceMap(draft.faceMap)
-    if (invalid) {
-      setProblem(invalid)
-      return
-    }
     setProblem(null)
     const res = await patch(assetId, {
-      face_map: draft.faceMap,
-      trim_euler: draft.trim,
+      front_flipped: draft.frontFlipped,
       // 清除哨兵：null 在 PATCH 里表示「不改该项」，故用 ''/0 表达「取消覆盖」
       unit_override: draft.unitOverride ?? '',
       height_override: draft.heightOverride ?? 0,
@@ -170,7 +154,6 @@ export function AlignStage() {
   }
 
   const canEdit = Boolean(align) && !busy
-  const semantics = (conventions?.face_semantics ?? []) as FaceSemantic[]
   const faceLabels = conventions?.face_labels ?? FACE_LABELS_FALLBACK
 
   return (
@@ -222,12 +205,10 @@ export function AlignStage() {
           </div>
         ) : (
           <>
-            <FaceMapEditor
-              faces={align.faces}
+            <OrientationPanel
               auto={align.auto}
+              pca={align.pca}
               draft={draft}
-              semantics={semantics.length ? semantics : undefined}
-              faceLabels={faceLabels}
               disabled={!canEdit}
               onDraftChange={(next) => setDraft((prev) => ({ ...prev, ...next }))}
             />
@@ -302,7 +283,7 @@ export function AlignStage() {
               <h3>自动探测</h3>
               <div className="muted">
                 方法：{align.auto.method}
-                {align.obb ? ` · 外切盒 ${align.obb.extents.map((v) => v.toFixed(3)).join(' × ')} m` : ' · 外切盒求解失败（退化为世界轴吸附）'}
+                {align.bbox ? ` · 外切盒 ${align.bbox.extents.map((v) => v.toFixed(3)).join(' × ')} m` : ' · 外切盒求解失败'}
                 {` · canon ${align.final.changed ? '已改写' : '未变化'}`}
               </div>
               {align.auto.notes.length ? (
@@ -324,13 +305,10 @@ export function AlignStage() {
       <section className="main">
         <ViewerCanvas focus={focus} cameraPosition={[1.9, 1.5, 2.5]}>
           {glbUrl ? <GlbModel url={glbUrl} ghost={ghost} onBounds={onBounds} /> : null}
-          {showBox && align?.obb ? (
+          {showBox && align?.bbox ? (
             <BoundingBoxFaces
-              obb={align.obb}
-              rotation={align.final.rotation}
-              scale={align.final.scale}
-              faceMap={draft.faceMap}
-              auto={align.auto}
+              bbox={align.bbox}
+              faceLabels={faceLabels}
               showFaces={showFaces}
               showLabels={showLabels}
             />
@@ -339,23 +317,23 @@ export function AlignStage() {
         </ViewerCanvas>
 
         <div className="overlay">
-          <div style={{ fontWeight: 700 }}>面编号约定</div>
+          <div style={{ fontWeight: 700 }}>外切盒六面语义</div>
           <div className="muted" style={{ marginTop: 4, lineHeight: 1.6 }}>
-            1 = +轴0，2 = −轴0，3 = +轴1，4 = −轴1，5 = +轴2，6 = −轴2。
+            规范系米制 AABB，与模型同坐标系，底面贴模型最低点。
             <br />
-            <span style={{ color: 'var(--ok)' }}>绿 = up(+Y)</span>
+            <span style={{ color: 'var(--ok)' }}>+Y up</span>
             {' · '}
-            <span style={{ color: 'var(--acc)' }}>蓝 = front(+Z)</span>
+            <span style={{ color: 'var(--acc)' }}>+Z front</span>
             {' · '}
-            <span style={{ color: 'var(--warn)' }}>橙 = left(+X)</span>
+            <span style={{ color: 'var(--warn)' }}>+X left</span>
             <br />
-            盒子上标的数字与左栏表格逐面对应；拖动可自由旋转查看。
+            拖动可自由旋转查看；确认角色面部朝向 +Z。
           </div>
           {align ? (
             <div className="muted" style={{ marginTop: 6 }}>
               身高 {align.unit.height_m.toFixed(3)} m · 缩放 {align.final.scale.toExponential(3)}
               {' · '}
-              {Object.keys(draft.faceMap).length ? '人工面映射' : '自动指派'}
+              {draft.frontFlipped ? '前后已翻转' : '自动朝向'}
             </div>
           ) : null}
         </div>

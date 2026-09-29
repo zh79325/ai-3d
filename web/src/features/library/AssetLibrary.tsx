@@ -51,7 +51,7 @@ export function AssetLibrary() {
 
   const [name, setName] = useState('')
   const [file, setFile] = useState<File | null>(null)
-  /** 模型实际包围球：`align.obb` 为 null（凸包退化）时的取景兜底。 */
+  /** 模型实际包围球：`align.bbox` 为 null 时的取景兜底。 */
   const [bounds, setBounds] = useState<ModelBounds | null>(null)
   const fileInput = useRef<HTMLInputElement | null>(null)
   const onBounds = useCallback((next: ModelBounds) => setBounds(next), [])
@@ -97,9 +97,9 @@ export function AssetLibrary() {
   }, [detail])
 
   const focus: ViewFocus | null = useMemo(() => {
-    const obb = detail?.align?.obb
-    if (obb) {
-      const sceneObb = toSceneObb(obb, detail?.align?.final.rotation, detail?.align?.final.scale)
+    const bbox = detail?.align?.bbox
+    if (bbox) {
+      const sceneObb = toSceneObb(bbox)
       return {
         center: [sceneObb.center.x, sceneObb.center.y, sceneObb.center.z],
         radius: Math.max(obbRadius(sceneObb), 0.05),
@@ -194,13 +194,9 @@ export function AssetLibrary() {
           <>
             <ViewerCanvas focus={focus} cameraPosition={[1.8, 1.5, 2.4]}>
               {glbUrl ? <GlbModel url={glbUrl} onBounds={onBounds} /> : null}
-              {detail.align?.obb ? (
+              {detail.align?.bbox ? (
                 <BoundingBoxFaces
-                  obb={detail.align.obb}
-                  rotation={detail.align.final.rotation}
-                  scale={detail.align.final.scale}
-                  faceMap={detail.align.manual.face_map}
-                  auto={detail.align.auto}
+                  bbox={detail.align.bbox}
                 />
               ) : null}
               <AxisGizmo length={focus ? focus.radius * 0.7 : 0.4} />
