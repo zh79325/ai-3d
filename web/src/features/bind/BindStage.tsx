@@ -310,7 +310,7 @@ export function BindStage() {
     return (
       <div className="empty" style={FULL_ROW}>
         素材不存在或已被删除。
-        <div style={{ marginTop: 10 }}><Link to="/library">← 返回素材库</Link></div>
+        <div style={{ marginTop: 10 }}><Link to="/models">← 返回模型管理</Link></div>
         {pollError ? <div className="note err">{pollError}</div> : null}
       </div>
     )
@@ -318,9 +318,9 @@ export function BindStage() {
   if (detail.kind !== 'model') {
     return (
       <div className="empty" style={FULL_ROW}>
-        这是<b>动画素材</b>，不走 S2 绑定：它只需 S1 归一化，入库后可被任意模型复用。
+        这是<b>动画素材</b>，不走 S2 绑定：它只需归一化，入库后可被任意模型复用。
         <div style={{ marginTop: 10 }}>
-          <Link to={`/asset/${assetId}/s1`}>← 回到 S1</Link>
+          <Link to={`/animations/${assetId}`}>← 回工作区</Link>
         </div>
       </div>
     )
@@ -328,9 +328,9 @@ export function BindStage() {
   if (!detail.align) {
     return (
       <div className="empty" style={FULL_ROW}>
-        该素材还没有 S1 产物，先在 S1 页上传文件。
+        该素材还没有校准产物，先在工作区上传文件。
         <div style={{ marginTop: 10 }}>
-          <Link to={`/asset/${assetId}/s1`}>← 去 S1 导入矫正</Link>
+          <Link to={`/models/${assetId}`}>← 去工作区上传</Link>
         </div>
       </div>
     )
@@ -347,8 +347,8 @@ export function BindStage() {
     <>
       <aside className="side">
         <div className="row tight" style={{ gap: 6, marginBottom: 8 }}>
-          <button className="ghost sm" onClick={() => navigate('/library')}>← 素材库</button>
-          <Link to={`/asset/${assetId}/s1`} className="badge b-CREATED" title="回到 S1 导入矫正">S1</Link>
+          <button className="ghost sm" onClick={() => navigate('/models')}>← 模型管理</button>
+          <Link to={`/models/${assetId}`} className="badge b-CREATED" title="回到工作区校准">校准</Link>
           <span className="badge b-RUNNING" title="当前阶段">S2</span>
           <span className={`badge b-${state}`}>{state}</span>
         </div>
@@ -388,7 +388,7 @@ export function BindStage() {
         {!aligned ? (
           <div className="note warn">
             S1 还没确认（当前 {detail.state}）。单位没矫正就绑定会让蒙皮的米制阈值全错，
-            请先回 <Link to={`/asset/${assetId}/s1`}>S1</Link> 确认。
+            请先回 <Link to={`/models/${assetId}`}>工作区</Link> 确认。
           </div>
         ) : null}
 

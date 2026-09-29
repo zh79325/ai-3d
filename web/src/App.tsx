@@ -1,35 +1,46 @@
 /**
  * 路由表。
  *
- * S1（导入矫正）与 S2（绑定）都是**素材级**的：产物写 `output/assets/<id>/`，
- * 绑定结果被所有引用该模型的作业复用，所以挂在 `/asset/:assetId/*`。
- * S3（重定向）与 S4（导出）是作业级的（模型 × 动画），在 P4/P5 挂到 `/job/:jobId/*`。
- * `/asset/:assetId` 裸路径重定向到 S1 —— 流程总是从导入矫正开始。
+ * 顶栏两个独立一级菜单：`模型管理`（`/models`）与 `动画管理`（`/animations`），
+ * 共用同一套「列表页 `Library` + 工作区 `Workspace`」组件，按 `kind` 参数化。
+ *
+ * 工作区一气呵成：选文件即自动上传 + 后端同步跑完轴校准 → 同页直接展示 3D 结果与
+ * 人工调整面板，无「进入 S1 / 确认 S1」阶段跳转，流程停在工作区。S2 绑定仍是素材级
+ * 的独立页 `/asset/:assetId/s2`，由工作区的低调「去 S2 绑定」入口进入。
+ *
+ * 旧路径 `/library`、`/asset/:assetId(/s1)` 一律重定向到 `/models`（无法从旧 URL
+ * 反推 kind，且新流程已合并，统一回模型列表即可）。
  */
 import { useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { AppShell } from './components/layout/AppShell'
-import { AlignStage } from './features/align/AlignStage'
 import { BindStage } from './features/bind/BindStage'
-import { AssetLibrary } from './features/library/AssetLibrary'
+import { Library } from './features/library/Library'
+import { Workspace } from './features/workspace/Workspace'
 import { useAssetStore } from './store/assetStore'
 
 export function App() {
   const loadConventions = useAssetStore((s) => s.loadConventions)
   useEffect(() => {
-    // 面编号标签、语义轴取值域等固定约定由后端单点下发，启动时拉一次
+    // 面编号标签等固定约定由后端单点下发，启动时拉一次
     void loadConventions()
   }, [loadConventions])
 
   return (
     <Routes>
       <Route element={<AppShell />}>
-        <Route path="/library" element={<AssetLibrary />} />
-        <Route path="/asset/:assetId" element={<Navigate to="s1" replace />} />
-        <Route path="/asset/:assetId/s1" element={<AlignStage />} />
+        <Route path="/models" element={<Library kind="model" />} />
+        <Route path="/models/:assetId" element={<Workspace kind="model" />} />
+        <Route path="/animations" element={<Library kind="animation" />} />
+        <Route path="/animations/:assetId" element={<Workspace kind="animation" />} />
         <Route path="/asset/:assetId/s2" element={<BindStage />} />
-        <Route path="*" element={<Navigate to="/library" replace />} />
+        {/* 旧路径兼容 */}
+        <Route path="/library" element={<Navigate to="/models" replace />} />
+        <Route path="/asset/:assetId" element={<Navigate to="/models" replace />} />
+        <Route path="/asset/:assetId/s1" element={<Navigate to="/models" replace />} />
+        <Route path="/" element={<Navigate to="/models" replace />} />
+        <Route path="*" element={<Navigate to="/models" replace />} />
       </Route>
     </Routes>
   )

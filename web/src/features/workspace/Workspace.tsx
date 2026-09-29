@@ -1,18 +1,22 @@
 /**
- * S1 导入矫正页。
+ * 工作区（一气呵成）：合并「上传 + 轴校准 + 人工调整」于一页，无阶段跳转。
  *
- * 布局：左栏是「人工修正表单」（朝向二选确认 / 单位身高）+ 动作按钮，右栏是
- * 3D 视口（模型 + 规范系外切盒 + 六面语义标签 + 坐标轴箭头）。V2 下校准基由
- * 后端语义先验自动组装（旋转恒为 90° 置换），人工只需二选确认「朝向正确 / 前后相反」。
+ * 流程：新建（列表页只输名称）后进本页 → 选/拖文件即 `upload(assetId, file)`（后端
+ * **同步跑完 S1**：格式归一 + 外切盒 + 轴校准 + 单位推断）→ 自动刷新出 3D 结果与
+ * 调整面板。**没有**「进入 S1 / 确认 S1」这类阶段按钮；S2 绑定作为低调链接由用户
+ * 自行决定何时进入。
  *
- * 表单是**草稿式**的：改动只落在本地 state，点「应用修正」才发一次 PATCH。后端每次
- * PATCH 都会在原始模型坐标下重测并重写 canon 节点（`_reset_canon` 保证反复修正
- * 不累积），所以频繁提交既慢又会让相机反复重取景。
+ * 布局：左栏 = 上传区（无 align 时）/ 朝向二选 + 单位面板 + 应用按钮（有 align 时），
+ * 右栏 = 3D 视口（模型 + 带「编号 · 语义轴」标签的规范系外切盒 + 坐标轴）。
+ *
+ * 表单是**草稿式**的：改动只落本地 state，点「应用修正」才发一次 PATCH。后端每次
+ * PATCH 都在原始模型坐标下重测并重写 canon 节点（`_reset_canon` 保证反复修正不累积）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { assetGlbUrl, usePollAsset } from '../../api/client'
+import type { AssetKind } from '../../api/types'
 import { AxisGizmo } from '../../components/three/AxisGizmo'
 import { BoundingBoxFaces, FACE_LABELS_FALLBACK } from '../../components/three/BoundingBoxFaces'
 import { GlbModel, type ModelBounds } from '../../components/three/GlbModel'
@@ -20,10 +24,10 @@ import { GHOST_LEVELS, type GhostLevel } from '../../components/three/GhostMater
 import { obbRadius, toSceneObb } from '../../components/three/obb'
 import { ViewerCanvas, type ViewFocus } from '../../components/three/ViewerCanvas'
 import { useAssetStore } from '../../store/assetStore'
-import { OrientationPanel, type OrientationDraft } from './OrientationPanel'
-import { UnitPanel, type UnitDraft } from './UnitPanel'
+import { OrientationPanel, type OrientationDraft } from '../align/OrientationPanel'
+import { UnitPanel, type UnitDraft } from '../align/UnitPanel'
 
-/** S1 表单草稿：朝向二选 + 单位覆盖。 */
+/** 工作区表单草稿：朝向二选 + 单位覆盖。 */
 interface Draft extends OrientationDraft, UnitDraft {}
 
 const EMPTY_DRAFT: Draft = {
@@ -37,9 +41,14 @@ const ACCEPT = '.fbx,.glb,.gltf'
 // 错误/加载态只渲染一个节点，要横跨 .shell 网格的两列，否则会挤在左栏宽度里
 const FULL_ROW = { gridColumn: '1 / -1' } as const
 
-export function AlignStage() {
+export interface WorkspaceProps {
+  kind: AssetKind
+}
+
+export function Workspace({ kind }: WorkspaceProps) {
   const { assetId = '' } = useParams()
   const navigate = useNavigate()
+  const listPath = kind === 'model' ? '/models' : '/animations'
   const { data: detail, loading, error: pollError, refresh } = usePollAsset(
     assetId || null, { intervalMs: 1500 })
 
@@ -56,6 +65,7 @@ export function AlignStage() {
 
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [problem, setProblem] = useState<string | null>(null)
+  const [dragging, setDragging] = useState(false)
   const [showBox, setShowBox] = useState(true)
   const [showLabels, setShowLabels] = useState(true)
   const [showFaces, setShowFaces] = useState(true)
@@ -125,18 +135,15 @@ export function AlignStage() {
     if (res) refresh()
   }
 
-  async function onConfirm() {
-    // 模型确认后后端会立即起 S2（默认走 AI 路径，没视角图就停在 WAIT_VIEWS），
-    // 所以直接跳到 S2 页看进度；动画素材确认后即入库，留在本页
-    const info = await confirm(assetId)
-    if (!info) return
-    if (info.kind === 'model') navigate(`/asset/${assetId}/s2`)
-    else refresh()
-  }
-
   async function onUpload(file: File) {
     const res = await upload(assetId, file)
     if (res) refresh()
+  }
+
+  /** 动画素材：确认后即入库，可被任意模型复用（模型素材不需要在此确认，直接去 S2）。 */
+  async function onConfirmAnimation() {
+    const info = await confirm(assetId)
+    if (info) refresh()
   }
 
   if (!assetId) return <div className="empty" style={FULL_ROW}>缺少素材 ID</div>
@@ -147,7 +154,7 @@ export function AlignStage() {
     return (
       <div className="empty" style={FULL_ROW}>
         素材不存在或已被删除。
-        <div style={{ marginTop: 10 }}><Link to="/library">← 返回素材库</Link></div>
+        <div style={{ marginTop: 10 }}><Link to={listPath}>← 返回列表</Link></div>
         {pollError ? <div className="note err">{pollError}</div> : null}
       </div>
     )
@@ -160,20 +167,12 @@ export function AlignStage() {
     <>
       <aside className="side">
         <div className="row tight" style={{ gap: 6, marginBottom: 8 }}>
-          <button className="ghost sm" onClick={() => navigate('/library')}>← 素材库</button>
-          <span className={`badge b-${detail.state}`}>S1 {detail.state}</span>
-          {detail.kind === 'model' ? (
-            <Link to={`/asset/${assetId}/s2`} className={`badge b-${detail.binding.state}`}>
-              S2 {detail.binding.state}
-            </Link>
-          ) : (
-            <span className={`badge b-${detail.binding.state}`}>S2 {detail.binding.state}</span>
-          )}
+          <button className="ghost sm" onClick={() => navigate(listPath)}>← {kind === 'model' ? '模型管理' : '动画管理'}</button>
+          <span className={`badge b-${detail.state}`}>{detail.state}</span>
         </div>
-        <h1 style={{ marginBottom: 2 }}>S1 导入矫正</h1>
+        <h1 style={{ marginBottom: 2 }}>{detail.name || detail.filename || detail.asset_id}</h1>
         <div className="muted" style={{ marginBottom: 10 }}>
-          {detail.name || detail.filename || detail.asset_id}
-          {detail.kind === 'animation' ? '（动画素材：确认后即入库复用）' : ''}
+          {kind === 'animation' ? '动画素材：确认后即入库，可被任意模型复用' : '模型素材：校准完成后可去 S2 绑定'}
         </div>
 
         {storeError ? <div className="note err">{storeError}</div> : null}
@@ -187,21 +186,41 @@ export function AlignStage() {
         {detail.error ? <div className="note err">后端报错：{detail.error}</div> : null}
 
         {!align ? (
-          <div className="card">
+          <div
+            className={`card dropzone${dragging ? ' on' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragging(false)
+              const picked = e.dataTransfer.files?.[0]
+              if (picked) void onUpload(picked)
+            }}
+          >
             <h3>上传文件</h3>
-            <div className="muted" style={{ marginBottom: 6 }}>
-              该素材还没有 S1 产物。上传 FBX / GLB / glTF 后会自动跑完格式归一、
-              外切盒求解、轴系指派与单位推断。
+            <div className="muted" style={{ marginBottom: 8 }}>
+              拖拽或选择 FBX / GLB / glTF 文件，选中即自动上传并跑完 X / Y 轴校准与单位归一，
+              回来直接展示结果。
+            </div>
+            <div className="drop-hint">
+              {busy ? <><span className="spin" /> 上传并校准中…</> : '⬆ 拖到此处，或点下方按钮选择'}
             </div>
             <input
               ref={fileInput}
               type="file"
               accept={ACCEPT}
+              style={{ display: 'none' }}
               onChange={(e) => {
                 const picked = e.target.files?.[0]
                 if (picked) void onUpload(picked)
+                e.target.value = ''
               }}
             />
+            <div className="row" style={{ marginTop: 8 }}>
+              <button disabled={busy} onClick={() => fileInput.current?.click()}>
+                {busy ? '处理中…' : '选择文件'}
+              </button>
+            </div>
           </div>
         ) : (
           <>
@@ -231,12 +250,12 @@ export function AlignStage() {
               </div>
               <div className="row" style={{ marginTop: 6 }}>
                 <button className="ghost" disabled={!canEdit} onClick={() => void onRealign()}>
-                  🔁 从原件重跑 S1
+                  🔁 从原件重跑
                 </button>
                 <button
                   className="ghost"
                   disabled={!canEdit}
-                  title="重新上传原件：覆盖后自动重跑格式归一 + S1"
+                  title="重新上传原件：覆盖后自动重跑格式归一 + 校准"
                   onClick={() => fileInput.current?.click()}
                 >
                   ⬆ 换文件
@@ -253,28 +272,26 @@ export function AlignStage() {
                   }}
                 />
               </div>
-              <div className="row" style={{ marginTop: 6 }}>
-                <button
-                  disabled={busy || detail.state !== 'ALIGN_READY'}
-                  title={detail.kind === 'model'
-                    ? '确认后进入 S2 绑定（骨骼 + 蒙皮）'
-                    : '确认后动画入库，可被任意模型复用'}
-                  onClick={() => void onConfirm()}
-                >
-                  🎯 确认 S1{detail.kind === 'model' ? '，进入 S2' : '，入库'}
-                </button>
+
+              {/* 流程停在工作区：S2 绑定 / 动画入库都是低调入口，用户自行决定 */}
+              <div className="row" style={{ marginTop: 10 }}>
+                {kind === 'model' ? (
+                  <Link to={`/asset/${assetId}/s2`} className="subtle-link">
+                    去 S2 绑定（骨骼 + 蒙皮）→
+                  </Link>
+                ) : (
+                  <button
+                    className="ghost sm"
+                    disabled={busy || detail.state === 'READY'}
+                    onClick={() => void onConfirmAnimation()}
+                  >
+                    {detail.state === 'READY' ? '✓ 已入库' : '确认入库（供模型复用）'}
+                  </button>
+                )}
               </div>
-              {detail.state === 'READY' ? (
-                <div className="note ok">
-                  S1 已确认。{detail.kind === 'model'
-                    ? (
-                      <>
-                        S2 绑定：{detail.binding.state}
-                        {detail.binding.stage ? `（${detail.binding.stage}）` : ''} ·
-                        {' '}<Link to={`/asset/${assetId}/s2`}>去 S2 页面</Link>
-                      </>
-                    )
-                    : '动画已入库，可在模型的 S3 页面选用。'}
+              {kind === 'animation' && detail.state === 'READY' ? (
+                <div className="note ok" style={{ marginTop: 6 }}>
+                  动画已入库，可在模型的 S3 页面选用。
                 </div>
               ) : null}
             </div>
@@ -303,57 +320,65 @@ export function AlignStage() {
       </aside>
 
       <section className="main">
-        <ViewerCanvas focus={focus} cameraPosition={[1.9, 1.5, 2.5]}>
-          {glbUrl ? <GlbModel url={glbUrl} ghost={ghost} onBounds={onBounds} /> : null}
-          {showBox && align?.bbox ? (
-            <BoundingBoxFaces
-              bbox={align.bbox}
-              faceLabels={faceLabels}
-              showFaces={showFaces}
-              showLabels={showLabels}
-            />
-          ) : null}
-          {showAxes ? <AxisGizmo length={focus ? focus.radius * 0.8 : 0.4} /> : null}
-        </ViewerCanvas>
+        {align ? (
+          <>
+            <ViewerCanvas focus={focus} cameraPosition={[1.9, 1.5, 2.5]}>
+              {glbUrl ? <GlbModel url={glbUrl} ghost={ghost} onBounds={onBounds} /> : null}
+              {showBox && align.bbox ? (
+                <BoundingBoxFaces
+                  bbox={align.bbox}
+                  faceLabels={faceLabels}
+                  showFaces={showFaces}
+                  showLabels={showLabels}
+                />
+              ) : null}
+              {showAxes ? <AxisGizmo length={focus ? focus.radius * 0.8 : 0.4} /> : null}
+            </ViewerCanvas>
 
-        <div className="overlay">
-          <div style={{ fontWeight: 700 }}>外切盒六面语义</div>
-          <div className="muted" style={{ marginTop: 4, lineHeight: 1.6 }}>
-            规范系米制 AABB，与模型同坐标系，底面贴模型最低点。
-            <br />
-            <span style={{ color: 'var(--ok)' }}>+Y up</span>
-            {' · '}
-            <span style={{ color: 'var(--acc)' }}>+Z front</span>
-            {' · '}
-            <span style={{ color: 'var(--warn)' }}>+X left</span>
-            <br />
-            拖动可自由旋转查看；确认角色面部朝向 +Z。
-          </div>
-          {align ? (
-            <div className="muted" style={{ marginTop: 6 }}>
-              身高 {align.unit.height_m.toFixed(3)} m · 缩放 {align.final.scale.toExponential(3)}
-              {' · '}
-              {draft.frontFlipped ? '前后已翻转' : '自动朝向'}
+            <div className="overlay">
+              <div style={{ fontWeight: 700 }}>外切盒六面（编号 · 语义轴）</div>
+              <div className="muted" style={{ marginTop: 4, lineHeight: 1.6 }}>
+                规范系米制 AABB，与模型同坐标系，底面贴模型最低点。
+                <br />
+                <span style={{ color: 'var(--ok)' }}>+Y up</span>
+                {' · '}
+                <span style={{ color: 'var(--acc)' }}>+Z front</span>
+                {' · '}
+                <span style={{ color: 'var(--warn)' }}>+X left</span>
+                <br />
+                拖动可自由旋转查看；确认角色面部朝向 +Z。
+              </div>
+              <div className="muted" style={{ marginTop: 6 }}>
+                身高 {align.unit.height_m.toFixed(3)} m · 缩放 {align.final.scale.toExponential(3)}
+                {' · '}
+                {draft.frontFlipped ? '前后已翻转' : '自动朝向'}
+              </div>
             </div>
-          ) : null}
-        </div>
 
-        <div className="toolbar">
-          <button className={showBox ? 'on' : 'ghost'} onClick={() => setShowBox((v) => !v)}>外切盒</button>
-          <button className={showFaces ? 'on' : 'ghost'} onClick={() => setShowFaces((v) => !v)}>面</button>
-          <button className={showLabels ? 'on' : 'ghost'} onClick={() => setShowLabels((v) => !v)}>编号</button>
-          <button className={showAxes ? 'on' : 'ghost'} onClick={() => setShowAxes((v) => !v)}>坐标轴</button>
-          <button
-            className={ghost ? 'on' : 'ghost'}
-            title={`模型半透明（${GHOST_LEVELS.faint}），便于看清盒子的后半段`}
-            onClick={() => setGhost((v) => (v ? null : 'faint'))}
-          >
-            幽灵
-          </button>
-        </div>
+            <div className="toolbar">
+              <button className={showBox ? 'on' : 'ghost'} onClick={() => setShowBox((v) => !v)}>外切盒</button>
+              <button className={showFaces ? 'on' : 'ghost'} onClick={() => setShowFaces((v) => !v)}>面</button>
+              <button className={showLabels ? 'on' : 'ghost'} onClick={() => setShowLabels((v) => !v)}>编号</button>
+              <button className={showAxes ? 'on' : 'ghost'} onClick={() => setShowAxes((v) => !v)}>坐标轴</button>
+              <button
+                className={ghost ? 'on' : 'ghost'}
+                title={`模型半透明（${GHOST_LEVELS.faint}），便于看清盒子的后半段`}
+                onClick={() => setGhost((v) => (v ? null : 'faint'))}
+              >
+                幽灵
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="empty">
+            <div style={{ fontSize: 40, marginBottom: 12 }}>⬆</div>
+            <div>在左侧选择或拖入模型文件，上传后自动完成轴校准并在此展示结果。</div>
+            {busy ? <div className="muted" style={{ marginTop: 8 }}><span className="spin" /> 处理中…</div> : null}
+          </div>
+        )}
       </section>
     </>
   )
 }
 
-export default AlignStage
+export default Workspace

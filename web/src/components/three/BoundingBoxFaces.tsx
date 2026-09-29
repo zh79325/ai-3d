@@ -5,6 +5,9 @@
  * `1=+X left, 2=-X right, 3=+Y up, 4=-Y down, 5=+Z front, 6=-Z back`（与后端
  * `obb.FACE_LABELS` 行序一致）。人工不再逐面指派，颜色与标签直接由面序号决定，
  * 用户只需在左栏二选确认「朝向正确 / 前后相反」。
+ *
+ * 每个面的标签为「面编号 · 对应语义轴」（如 `3 · +Y up`）：编号让人能按号指认
+ * 面，语义轴说明该面朝哪条规范轴。编号 1..6 按规范系固定序，与着色一致。
  */
 import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
@@ -125,7 +128,7 @@ export function BoundingBoxFaces({
           zIndexRange={[40, 20]}
           style={{ pointerEvents: 'none' }}
         >
-          <div className={`face-tag ${kind}`}>{text}</div>
+          <div className={`face-tag ${kind}`}><b>{id}</b> · {text}</div>
         </Html>
       ))}
     </group>
