@@ -63,23 +63,35 @@ export interface AlignUnit {
 
 /**
  * 自动校准结果：`up` / `forward` 为吸附到模型坐标轴的单位向量，`method` 标注
- * 先验来源（skeleton / mesh / identity），`notes` 是探测过程的诊断说明。
+ * 先验来源（skeleton / mesh / identity），`notes` 是探测过程的诊断说明；
+ * `axis_faces` 是自动结果换算成的面号指派（下拉框的默认值）。
  */
 export interface AlignAuto {
   method: string
   notes: string[]
   up: Vec3
   forward: Vec3
+  axis_faces: AxisFaces
 }
 
 /**
- * 人工修正段。V2 下人工只能二选确认朝向（`front_flipped`）+ 覆盖单位/身高；
- * 两项覆盖的**清除**用哨兵值（`null` 已被占用为「不改」）：`height_override <= 0`
- * 取消身高直填，`unit_override = ""` 取消强制单位。
+ * 面号指派：正面/左边/上面 各是外切盒几号面。编号 1..6 按**模型原坐标轴**固定
+ * （1=+X 2=-X 3=+Y 4=-Y 5=+Z 6=-Z），贴在模型自身的面上、不随校准旋转改变。
+ */
+export interface AxisFaces {
+  front: number
+  left: number
+  up: number
+}
+
+/**
+ * 人工修正段。V2 下人工按面号指派语义轴（`axis_faces`，null = 沿用自动结果）+
+ * 覆盖单位/身高；两项覆盖的**清除**用哨兵值（`null` 已被占用为「不改」）：
+ * `height_override <= 0` 取消身高直填，`unit_override = ""` 取消强制单位。
  */
 export interface AlignManual {
-  /** 前后方向是否相反（true = 绕规范系 Y 轴转 180°）。 */
-  front_flipped: boolean
+  /** 人工面号指派；null 表示未改过、沿用自动探测（等价于朝向正确）。 */
+  axis_faces: AxisFaces | null
   unit_override: string | null
   height_override: number | null
 }
@@ -99,6 +111,8 @@ export interface AlignDoc {
   unit: AlignUnit
   auto: AlignAuto
   manual: AlignManual
+  /** 每个编号面（1..6）在当前规范系下的外法向：前端把编号画到对应的盒面上。 */
+  face_axes: Vec3[]
   final: AlignFinal
 }
 
@@ -182,11 +196,11 @@ export interface AlignResponse {
 
 /**
  * `PATCH /v2/assets/{id}/align` 请求体。留 `undefined` 的字段表示不改该项；
- * `reset=true` 清空全部人工修正回到自动探测。人工能改的只有 `front_flipped` 二选
+ * `reset=true` 清空全部人工修正回到自动探测。人工能改的只有 `axis_faces` 面号指派
  * 与单位/身高覆盖，校准基与外切盒每次由后端重测。
  */
 export interface AlignPatch {
-  front_flipped?: boolean | null
+  axis_faces?: AxisFaces | null
   unit_override?: string | null
   height_override?: number | null
   reset?: boolean

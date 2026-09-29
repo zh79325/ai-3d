@@ -47,7 +47,7 @@ def merge_manual(current: Optional[Dict[str, Any]],
     """把 ``AlignPatch`` 合并进现有 align 的 ``manual`` 段，返回新的 manual。
 
     ``reset=True`` 直接清空全部人工修正（回到自动探测）；其余字段只在非 ``None`` 时
-    覆盖。校准基与外切盒由后端每次重测，人工能改的只有 ``front_flipped`` 二选与
+    覆盖。校准基与外切盒由后端每次重测，人工能改的只有 ``axis_faces`` 面号指派与
     两项覆盖。
 
     两项覆盖的**清除**约定（JSON 里 ``None`` 已被用作「不改」，故用哨兵值）：
@@ -58,8 +58,9 @@ def merge_manual(current: Optional[Dict[str, Any]],
         return manual
     if patch.reset:
         return {}
-    if patch.front_flipped is not None:
-        manual["front_flipped"] = bool(patch.front_flipped)
+    if patch.axis_faces is not None:
+        manual["axis_faces"] = patch.axis_faces.model_dump()
+        manual.pop("front_flipped", None)   # 旧字段：面号指派已取代二选
     if patch.unit_override is not None:
         manual["unit_override"] = patch.unit_override.strip() or None
     if patch.height_override is not None:

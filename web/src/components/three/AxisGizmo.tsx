@@ -1,12 +1,11 @@
 /**
- * 规范系坐标轴指示器：+Y up（绿）、+Z front（蓝，角色朝向）、+X left（橙，角色左侧）。
+ * 规范系坐标轴指示器：只标**上面 / 正面 / 左边**三个方向（右/后/下不标，看盒面
+ * 编号即可推断）：+Y 上面（绿）、+Z 正面（蓝，角色朝向）、+X 左边（橙，角色左侧）。
  *
  * 颜色与 `BoundingBoxFaces` 的语义轴着色、`styles.css` 的 `.face-tag.up/.front/.left`
- * 一致，看箭头就能判断模型是否已经转正 —— S1 人工修正时这是最直接的目视参照。
+ * 一致，看箭头就能判断模型是否已经转正 —— 人工修正时这是最直接的目视参照。
  *
- * 轴向语义来自后端 `GET /v2/conventions` 的 `canonical_axes`，可由 `labels` 覆盖；
- * 拉不到时用这里的默认值（右手系 +Y up / +Z front / +X left，与
- * `axis_norm._SEMANTIC_ROWS` 的行序一致）。
+ * 标签文字默认中文，可由 `labels` 覆盖。
  */
 import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
@@ -18,7 +17,7 @@ export interface AxisLabels {
   left: string
 }
 
-const DEFAULT_LABELS: AxisLabels = { up: '+Y', front: '+Z', left: '+X' }
+const DEFAULT_LABELS: AxisLabels = { up: '上面', front: '正面', left: '左边' }
 
 interface AxisSpec {
   key: keyof AxisLabels
@@ -78,7 +77,7 @@ export function AxisGizmo({
             style={{ pointerEvents: 'none' }}
           >
             <div className="face-tag" style={{ background: axis.color, color: '#08111f' }}>
-              {text[axis.key]} {axis.name}
+              {text[axis.key]}
             </div>
           </Html>
         )

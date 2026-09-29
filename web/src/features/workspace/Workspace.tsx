@@ -6,8 +6,8 @@
  * 调整面板。**没有**「进入 S1 / 确认 S1」这类阶段按钮；S2 绑定作为低调链接由用户
  * 自行决定何时进入。
  *
- * 布局：左栏 = 上传区（无 align 时）/ 朝向二选 + 单位面板 + 应用按钮（有 align 时），
- * 右栏 = 3D 视口（模型 + 带「编号 · 语义轴」标签的规范系外切盒 + 坐标轴）。
+ * 布局：左栏 = 上传区（无 align 时）/ 面号下拉 + 单位面板 + 应用按钮（有 align 时），
+ * 右栏 = 3D 视口（模型 + 只标编号的外切盒 + 中文坐标轴箭头：上面/正面/左边）。
  *
  * 表单是**草稿式**的：改动只落本地 state，点「应用修正」才发一次 PATCH。后端每次
  * PATCH 都在原始模型坐标下重测并重写 canon 节点（`_reset_canon` 保证反复修正不累积）。
@@ -18,7 +18,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { assetGlbUrl, usePollAsset } from '../../api/client'
 import type { AssetKind } from '../../api/types'
 import { AxisGizmo } from '../../components/three/AxisGizmo'
-import { BoundingBoxFaces, FACE_LABELS_FALLBACK } from '../../components/three/BoundingBoxFaces'
+import { BoundingBoxFaces } from '../../components/three/BoundingBoxFaces'
 import { GlbModel, type ModelBounds } from '../../components/three/GlbModel'
 import { GHOST_LEVELS, type GhostLevel } from '../../components/three/GhostMaterial'
 import { obbRadius, toSceneObb } from '../../components/three/obb'
@@ -27,11 +27,11 @@ import { useAssetStore } from '../../store/assetStore'
 import { OrientationPanel, type OrientationDraft } from '../align/OrientationPanel'
 import { UnitPanel, type UnitDraft } from '../align/UnitPanel'
 
-/** 工作区表单草稿：朝向二选 + 单位覆盖。 */
+/** 工作区表单草稿：面号指派 + 单位覆盖。 */
 interface Draft extends OrientationDraft, UnitDraft {}
 
 const EMPTY_DRAFT: Draft = {
-  frontFlipped: false,
+  axisFaces: { front: 5, left: 1, up: 3 },
   unitOverride: null,
   heightOverride: null,
 }
@@ -56,7 +56,6 @@ export function Workspace({ kind }: WorkspaceProps) {
   const storeError = useAssetStore((s) => s.error)
   const notice = useAssetStore((s) => s.notice)
   const setNotice = useAssetStore((s) => s.setNotice)
-  const conventions = useAssetStore((s) => s.conventions)
   const patch = useAssetStore((s) => s.patch)
   const resetAlign = useAssetStore((s) => s.reset)
   const realign = useAssetStore((s) => s.realign)
@@ -89,7 +88,7 @@ export function Workspace({ kind }: WorkspaceProps) {
       return
     }
     setDraft({
-      frontFlipped: Boolean(align.manual.front_flipped),
+      axisFaces: align.manual.axis_faces ?? align.auto.axis_faces ?? EMPTY_DRAFT.axisFaces,
       unitOverride: align.manual.unit_override,
       heightOverride: align.manual.height_override,
     })
@@ -117,7 +116,7 @@ export function Workspace({ kind }: WorkspaceProps) {
   async function onApply() {
     setProblem(null)
     const res = await patch(assetId, {
-      front_flipped: draft.frontFlipped,
+      axis_faces: draft.axisFaces,
       // 清除哨兵：null 在 PATCH 里表示「不改该项」，故用 ''/0 表达「取消覆盖」
       unit_override: draft.unitOverride ?? '',
       height_override: draft.heightOverride ?? 0,
@@ -161,7 +160,12 @@ export function Workspace({ kind }: WorkspaceProps) {
   }
 
   const canEdit = Boolean(align) && !busy
-  const faceLabels = conventions?.face_labels ?? FACE_LABELS_FALLBACK
+  // 草稿与自动结果一致 = 未人工改过朝向（下拉保持默认即「朝向正确」）
+  const autoFaces = align?.auto.axis_faces ?? null
+  const isAutoFaces = !autoFaces
+    || (draft.axisFaces.front === autoFaces.front
+      && draft.axisFaces.left === autoFaces.left
+      && draft.axisFaces.up === autoFaces.up)
 
   return (
     <>
@@ -327,7 +331,7 @@ export function Workspace({ kind }: WorkspaceProps) {
               {showBox && align.bbox ? (
                 <BoundingBoxFaces
                   bbox={align.bbox}
-                  faceLabels={faceLabels}
+                  faceAxes={align.face_axes}
                   showFaces={showFaces}
                   showLabels={showLabels}
                 />
@@ -336,22 +340,22 @@ export function Workspace({ kind }: WorkspaceProps) {
             </ViewerCanvas>
 
             <div className="overlay">
-              <div style={{ fontWeight: 700 }}>外切盒六面（编号 · 语义轴）</div>
+              <div style={{ fontWeight: 700 }}>外切盒六面编号</div>
               <div className="muted" style={{ marginTop: 4, lineHeight: 1.6 }}>
-                规范系米制 AABB，与模型同坐标系，底面贴模型最低点。
+                编号贴在模型自身的面上，不随旋转改变；左栏下拉选择各语义轴对应的编号。
                 <br />
-                <span style={{ color: 'var(--ok)' }}>+Y up</span>
+                <span style={{ color: 'var(--ok)' }}>上面</span>
                 {' · '}
-                <span style={{ color: 'var(--acc)' }}>+Z front</span>
+                <span style={{ color: 'var(--acc)' }}>正面</span>
                 {' · '}
-                <span style={{ color: 'var(--warn)' }}>+X left</span>
+                <span style={{ color: 'var(--warn)' }}>左边</span>
                 <br />
-                拖动可自由旋转查看；确认角色面部朝向 +Z。
+                拖动可自由旋转查看；确认角色面部朝向「正面」箭头。
               </div>
               <div className="muted" style={{ marginTop: 6 }}>
                 身高 {align.unit.height_m.toFixed(3)} m · 缩放 {align.final.scale.toExponential(3)}
                 {' · '}
-                {draft.frontFlipped ? '前后已翻转' : '自动朝向'}
+                {isAutoFaces ? '自动朝向' : '已人工指定朝向'}
               </div>
             </div>
 

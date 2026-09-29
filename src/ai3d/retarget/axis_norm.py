@@ -9,8 +9,10 @@
   坐标轴**，在场景根插入纯旋转节点 ``canon_axis_root``，不改顶点与动画通道。
 - :func:`align_asset`（S1 导入矫正 V2）：校准基由语义先验（骨架 pelvis→head /
   foot→ball；纯网格 bbox 最长轴 + 脚端双簇符号 / 最薄轴 + 头带前凸符号）吸附到模型
-  坐标轴组装（90° 置换，det=+1 无镜像），人工交互只有「当前朝向正确 / 前后方向相反」
-  二选（``manual.front_flipped``，相反左乘 ``diag(-1,1,-1)``）；PCA 三主轴写入
+  坐标轴组装（90° 置换，det=+1 无镜像），人工交互按**面号**指派语义轴：外切盒六面
+  按模型原坐标轴固定编号 1..6（``_RAW_FACE_NORMALS``），人工在 ``manual.axis_faces``
+  里填「正面/左边/上面 各是几号面」，后端据此组装最终旋转；不填即沿用自动探测结果
+  （等价于朝向正确）；PCA 三主轴写入
   align.json 作缺先验时的轴线证据与调试展示；外切盒在**校准后**按规范系米制 AABB
   测量（与 asset.glb 同坐标系）；另做**单位缩放**（同一 canon 节点带 scale），产出
   ``align.json`` 供前端立方体可视化与人工修正。
@@ -516,12 +518,59 @@ def normalize_axes_file(path) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# S1 轴校准 V2：PCA 主轴 + 语义先验 + 人工二选确认（/v2 资产库使用）
+# S1 轴校准 V2：PCA 主轴 + 语义先验 + 人工面号指派（/v2 资产库使用）
 # --------------------------------------------------------------------------- #
-_MANUAL_KEYS: Tuple[str, ...] = ("front_flipped", "unit_override",
-                                 "height_override")
-# 前后方向相反 = 绕规范系 Y 轴转 180°（保持右手系，不产生镜像）
-_FLIP_Y = np.diag([-1.0, 1.0, -1.0])
+_MANUAL_KEYS: Tuple[str, ...] = ("axis_faces", "front_flipped",
+                                 "unit_override", "height_override")
+
+# 外切盒六面编号按**模型原坐标轴**固定：1=+X 2=-X 3=+Y 4=-Y 5=+Z 6=-Z。
+# 编号贴在模型自身的面上，不随校准旋转改变，人工才能稳定地「按号指认正面」。
+_RAW_FACE_NORMALS: np.ndarray = np.array(
+    [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+     [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]], dtype=np.float64)
+# 语义轴行序与 calibrate_frame 一致：[left, up, front]
+_SEMANTIC_ORDER: Tuple[str, ...] = ("left", "up", "front")
+
+
+def _face_id_of(vec: np.ndarray) -> int:
+    """单位 ±轴向量 → 面号 1..6（取点积最大的面）。"""
+    return int(np.argmax(_RAW_FACE_NORMALS @ np.asarray(vec, dtype=np.float64))) + 1
+
+
+def _opp_face(face_id: int) -> int:
+    """对面编号（1↔2、3↔4、5↔6）。"""
+    return face_id + 1 if face_id % 2 == 1 else face_id - 1
+
+
+def _norm_axis_faces(raw: Any) -> Optional[Dict[str, int]]:
+    """校验人工面号指派：front/left/up 均为 1..6 的整数，缺任一项当未填。"""
+    if not isinstance(raw, dict):
+        return None
+    out: Dict[str, int] = {}
+    for key in _SEMANTIC_ORDER:
+        try:
+            v = int(raw.get(key))
+        except (TypeError, ValueError):
+            return None
+        if v < 1 or v > 6:
+            return None
+        out[key] = v
+    return out
+
+
+def _faces_rotation(faces: Dict[str, int]) -> Optional[np.ndarray]:
+    """由面号指派组装 模型坐标 → 规范坐标 的旋转：行 = [left, up, front]。
+
+    要求三号面两两正交且构成右手系（``cross(up, front) == left``）；否则返回
+    ``None``（镜像或共轴组合无法用旋转实现），调用方回退自动结果并记 note。
+    """
+    rows = [ _RAW_FACE_NORMALS[faces[k] - 1] for k in _SEMANTIC_ORDER ]
+    rot = np.stack(rows)
+    if not np.allclose(rot @ rot.T, np.eye(3), atol=1e-9):
+        return None
+    if float(np.linalg.det(rot)) <= 0.0:
+        return None
+    return rot
 
 
 def _pos_float(raw: Any) -> Optional[float]:
@@ -641,18 +690,35 @@ def build_align(g, align: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not raw_manual and align:
         raw_manual = {k: v for k, v in align.items() if k in _MANUAL_KEYS}
     override = raw_manual.get("unit_override")
-    manual: Dict[str, Any] = {
-        "front_flipped": bool(raw_manual.get("front_flipped")),
-        "unit_override": str(override).strip().lower() if override else None,
-        "height_override": _pos_float(raw_manual.get("height_override")),
-    }
     notes: List[str] = list(dirs.get("notes") or [])
     if from_joints:
         notes.append("无网格：包围盒与身高按骨架关节位置测量（动画素材的常见形态）")
-    rot, auto = calibrate_frame(dirs)
+    rot_auto, auto = calibrate_frame(dirs)
     notes.extend(auto["notes"])
-    if manual["front_flipped"]:
-        rot = _FLIP_Y @ rot
+    # 自动结果换算成面号指派（默认值）：哪个原坐标轴面被自动转到了 +X/+Y/+Z
+    auto_faces = {"left": _face_id_of(rot_auto.T @ np.array([1.0, 0.0, 0.0])),
+                  "up": _face_id_of(rot_auto.T @ np.array([0.0, 1.0, 0.0])),
+                  "front": _face_id_of(rot_auto.T @ np.array([0.0, 0.0, 1.0]))}
+    manual_faces = _norm_axis_faces(raw_manual.get("axis_faces"))
+    if manual_faces is None and bool(raw_manual.get("front_flipped")):
+        # 旧存档迁移：「前后相反」= 正面与左边同时换到对面（绕 Y 转 180°）
+        manual_faces = {"front": _opp_face(auto_faces["front"]),
+                        "left": _opp_face(auto_faces["left"]),
+                        "up": auto_faces["up"]}
+    manual: Dict[str, Any] = {
+        "axis_faces": manual_faces,
+        "unit_override": str(override).strip().lower() if override else None,
+        "height_override": _pos_float(raw_manual.get("height_override")),
+    }
+    rot = _faces_rotation(manual_faces) if manual_faces else None
+    if manual_faces is not None and rot is None:
+        notes.append("人工面号组合不构成右手系（存在镜像/共轴），已回退自动朝向")
+        manual["axis_faces"] = None
+        rot = rot_auto
+    if rot is None:
+        rot = rot_auto
+    # 每个编号面在当前规范系下的外法向：前端把编号画到对应的盒面上
+    face_axes = [np.round(rot @ n, 6).tolist() for n in _RAW_FACE_NORMALS]
     # 规范系（米制）包围盒：先把顶点旋到规范朝向量 up 跨度定单位，再乘 scale 得米制；
     # 与 asset.glb 同坐标系，前端直接画、六面标签即语义名
     cal_pts = pts @ rot.T if len(pts) else np.zeros((0, 3))
@@ -666,8 +732,9 @@ def build_align(g, align: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "pca": pca_axes(pts),
         "bbox": bbox.to_dict() if bbox is not None else None,
         "unit": unit,
-        "auto": {**auto, "notes": notes},
+        "auto": {**auto, "notes": notes, "axis_faces": auto_faces},
         "manual": manual,
+        "face_axes": face_axes,
         "final": {"rotation": [[round(float(v), 9) for v in row] for row in rot],
                   "scale": unit["scale"], "changed": False},
     }
@@ -678,7 +745,7 @@ def align_asset(path, align: Optional[Dict[str, Any]] = None,
     """S1 导入矫正 V2：对已归一为 GLB 的资产做 PCA + 校准基 + 单位矫正（原地保存）。
 
     校准基由语义先验吸附到模型坐标轴组装（90° 置换），人工修正只改 ``manual``
-    （``front_flipped`` / 单位 / 身高），本函数重测 PCA 与包围盒并重算 ``final`` +
+    （``axis_faces`` 面号指派 / 单位 / 身高），本函数重测 PCA 与包围盒并重算 ``final`` +
     重写 canon 节点。返回完整 align.json v2 结构；``json_path`` 给定时同时写出
     侧车文件。
     """
@@ -698,10 +765,10 @@ def align_asset(path, align: Optional[Dict[str, Any]] = None,
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     auto = info["auto"]
-    logger.info("S1 对齐 %s：%s up=%s fwd=%s flipped=%s unit=%s scale=%.6g "
+    logger.info("S1 对齐 %s：%s up=%s fwd=%s faces=%s unit=%s scale=%.6g "
                 "height=%.4fm changed=%s %s",
                 Path(path).name, auto["method"], auto["up"], auto["forward"],
-                info["manual"]["front_flipped"], info["unit"]["detected"],
+                info["manual"]["axis_faces"], info["unit"]["detected"],
                 info["final"]["scale"], info["unit"]["height_m"], changed,
                 ";".join(auto["notes"]) or "")
     return info

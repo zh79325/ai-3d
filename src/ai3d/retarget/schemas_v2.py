@@ -68,17 +68,27 @@ class AssetCreate(BaseModel):
     name: Optional[str] = None
 
 
+class AxisFaces(BaseModel):
+    """人工面号指派：正面/左边/上面 各是外切盒几号面（编号 1..6 按模型原坐标轴固定）。
+
+    不传（或传自动探测的默认组合）即表示自动朝向正确，不做额外旋转。
+    """
+    front: int = Field(ge=1, le=6)
+    left: int = Field(ge=1, le=6)
+    up: int = Field(ge=1, le=6)
+
+
 class AlignPatch(BaseModel):
     """PATCH /v2/assets/{id}/align：只改 ``manual`` 段，后端重算 ``final``。
 
-    ``front_flipped`` = 前后方向是否相反（True 即绕规范系 Y 轴转 180°，对应人工
-    二选确认的「前后方向相反」）；校准基与外切盒由后端自动重测，不接受人工欧拉角。
+    ``axis_faces`` = 人工按外切盒面号指派语义轴（正面/左边/上面 各是几号面），
+    后端据此组装最终旋转；校准基与外切盒由后端自动重测，不接受人工欧拉角。
     字段留 ``None`` 表示不改该项。
 
     两项覆盖的**清除**用哨兵值（``None`` 已被占用为「不改」）：
     ``height_override <= 0`` 取消真实身高直填，``unit_override = ""`` 取消强制单位。
     """
-    front_flipped: Optional[bool] = None
+    axis_faces: Optional[AxisFaces] = None
     unit_override: Optional[str] = None
     height_override: Optional[float] = None
     reset: bool = False          # True = 清空全部人工修正，回到自动探测

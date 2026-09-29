@@ -1,18 +1,18 @@
 /**
- * 朝向确认面板：人工只需二选确认角色是否朝向 `+Z`。
+ * 朝向确认面板：人工按**外切盒面号**指派语义轴 —— 正面/左边/上面 各是几号面。
  *
- * V2 校准基由后端语义先验自动组装（骨架 pelvis→head / 网格脚端双簇），旋转恒为
- * 90° 置换。PCA 只能定轴线不能定前后符号，故正面朝向交给人工二选：
- * 「当前朝向正确」/「前后方向相反」。选相反时后端左乘 `diag(-1,1,-1)`（绕规范系
- * Y 轴转 180°，同时反转 X 与 Z，仍是右手系、无镜像），用户不需要手动调欧拉角。
+ * 编号 1..6 按模型原坐标轴固定（1=+X 2=-X 3=+Y 4=-Y 5=+Z 6=-Z），贴在模型自身的
+ * 面上、不随校准旋转改变（右图盒面上直接标着数字）。三个下拉的默认值 = 后端自动
+ * 探测结果（`auto.axis_faces`）：**不改即表示自动朝向正确**；改了某个下拉，另外两个
+ * 会按右手系自动跟着调（`cross(上, 正) = 左`），保证组合永远可旋转实现、不产生镜像。
  *
  * 本组件是**受控**的：草稿状态在 `Workspace`，改完点「应用修正」才发 PATCH。
  */
-import type { AlignAuto, PcaInfo } from '../../api/types'
+import type { AlignAuto, AxisFaces, PcaInfo, Vec3 } from '../../api/types'
 
 export interface OrientationDraft {
-  /** 前后方向是否相反（true = 绕规范系 Y 轴转 180°）。 */
-  frontFlipped: boolean
+  /** 当前生效的面号指派（默认 = 自动探测结果）。 */
+  axisFaces: AxisFaces
 }
 
 export interface OrientationPanelProps {
@@ -23,46 +23,71 @@ export interface OrientationPanelProps {
   onDraftChange: (next: OrientationDraft) => void
 }
 
-/** 把单位向量格式化成简短的轴向串（吸附后每行恰一个 ±1）。 */
-function axisText(v: number[]): string {
-  const name = ['X', 'Y', 'Z']
-  const i = v.reduce((best, cur, idx, arr) => (Math.abs(cur) > Math.abs(arr[best]) ? idx : best), 0)
-  const sign = v[i] >= 0 ? '+' : '−'
-  return `${sign}${name[i]}`
+/** 编号 1..6 在模型原坐标轴下的外法向（与后端 `_RAW_FACE_NORMALS` 同序）。 */
+const FACE_NORMALS: readonly Vec3[] = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+]
+
+const cross = (a: Vec3, b: Vec3): Vec3 => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+]
+
+/** 单位 ±轴向量 → 面号 1..6。 */
+const idOf = (v: Vec3): number =>
+  FACE_NORMALS.findIndex((n) => n[0] === v[0] && n[1] === v[1] && n[2] === v[2]) + 1
+
+/** 三个下拉：改一个，其余按右手系 `cross(上, 正) = 左` 自动补齐。 */
+const ROWS: { key: keyof AxisFaces; label: string }[] = [
+  { key: 'front', label: '正面' },
+  { key: 'left', label: '左边' },
+  { key: 'up', label: '上面' },
+]
+
+function withConsistency(cur: AxisFaces, key: keyof AxisFaces, value: number): AxisFaces {
+  const next: AxisFaces = { ...cur, [key]: value }
+  const n = (id: number) => FACE_NORMALS[id - 1]
+  if (key === 'front') next.left = idOf(cross(n(next.up), n(value)))
+  if (key === 'up') next.left = idOf(cross(n(value), n(next.front)))
+  if (key === 'left') next.up = idOf(cross(n(next.front), n(value)))
+  return next
 }
 
 export function OrientationPanel({ auto, pca, draft, disabled = false, onDraftChange }: OrientationPanelProps) {
+  const faces = draft.axisFaces
+  const autoFaces = auto.axis_faces
+  const isAuto = autoFaces
+    && faces.front === autoFaces.front && faces.left === autoFaces.left && faces.up === autoFaces.up
   return (
     <div className="card">
       <h3>朝向确认</h3>
       <div className="muted" style={{ marginBottom: 8 }}>
-        自动校准：up={axisText(auto.up)}、front={axisText(auto.forward)}（{auto.method}）。
-        请核对预览里角色是否<b>面部朝向 +Z（front）</b>；若背对则选「前后方向相反」。
+        右图盒面上标着编号 1~6（贴在模型自身、不随旋转改变）。选择
+        <b> 正面 / 左边 / 上面 </b>各是几号面；不选即表示自动朝向正确。
       </div>
-      <div className="row" style={{ gap: 8 }}>
-        <label className="choice" style={{ flex: 1 }}>
-          <input
-            type="radio"
-            name="orient"
-            checked={!draft.frontFlipped}
+      {ROWS.map(({ key, label }) => (
+        <div className="row" key={key} style={{ gap: 8, marginBottom: 6 }}>
+          <span style={{ width: 44 }}>{label}</span>
+          <select
+            value={faces[key]}
             disabled={disabled}
-            onChange={() => onDraftChange({ ...draft, frontFlipped: false })}
-          />
-          <span>当前朝向正确</span>
-        </label>
-        <label className="choice" style={{ flex: 1 }}>
-          <input
-            type="radio"
-            name="orient"
-            checked={draft.frontFlipped}
-            disabled={disabled}
-            onChange={() => onDraftChange({ ...draft, frontFlipped: true })}
-          />
-          <span>前后方向相反</span>
-        </label>
-      </div>
+            onChange={(e) => onDraftChange({
+              ...draft,
+              axisFaces: withConsistency(faces, key, Number(e.target.value)),
+            })}
+          >
+            {[1, 2, 3, 4, 5, 6].map((id) => <option key={id} value={id}>{id} 号面</option>)}
+          </select>
+          <span className="muted">
+            {key === 'front' ? '角色面部朝向' : key === 'left' ? '角色左手侧' : '头顶方向'}
+          </span>
+        </div>
+      ))}
       <div className="muted" style={{ marginTop: 6 }}>
-        选「相反」会绕 Y 轴整体转 180°（同时反转 X 与 Z），仍是右手系、不产生镜像。
+        {isAuto
+          ? `当前为自动朝向（${auto.method}）；改任一下拉即按所选面号重新定向。`
+          : '已人工指定面号：其余两轴按右手系自动补齐，不会产生镜像。'}
       </div>
 
       {pca ? (
