@@ -4,7 +4,7 @@
 在 IDE 中直接运行此文件即可启动服务（前端页面 + /v1 接口）。
 
 前置条件:
-- Python 解释器: ~/Desktop/ai-game/dudu/server/.venv/bin/python
+- Python 解释器: ~/Desktop/ai-game/ai-3d/.venv/bin/python
 - 端口默认 8790（可在 src/ai3d/config/retarget.yaml 或 RETARGET_SERVER_PORT 修改）
 """
 

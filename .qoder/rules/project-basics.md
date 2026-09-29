@@ -5,7 +5,7 @@ trigger: always_on
 # 项目基本约束
 
 ## 环境
-- Python 解释器固定用 `/Users/eleme/Desktop/ai-game/dudu/server/.venv/bin/python`（在项目根可用相对路径 `../dudu/server/.venv/bin/python`），不要新建虚拟环境
+- Python 解释器固定用项目内 `/Users/eleme/Desktop/ai-game/ai-3d/.venv/bin/python`（Python 3.11，uv 创建；在项目根可用相对路径 `./.venv/bin/python`），不要新建其他虚拟环境
 - 新依赖必须同时写入 `pyproject.toml` 的 `dependencies` 和 `requirements.txt`
 - 包源码在 `src/ai3d/`，import 一律用 `from ai3d.xxx import ...`，不写相对上跳路径
 

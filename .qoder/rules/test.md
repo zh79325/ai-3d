@@ -16,7 +16,7 @@ description: 写测试、跑测试、验证改动是否可用时遵循的规则
 
 ## 运行
 ```bash
-/Users/eleme/Desktop/dudu/server/.venv/bin/python -m pytest tests/ -v
+/Users/eleme/Desktop/ai-game/ai-3d/.venv/bin/python -m pytest tests/ -v
 ```
 
 ## 验证标准

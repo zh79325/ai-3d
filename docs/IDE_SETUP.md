@@ -7,7 +7,7 @@
 1. 打开 **Settings** → **Project** → **Python Interpreter**
 2. 点击齿轮图标 → **Add...**
 3. 选择 **Existing environment**
-4. 浏览到: `/Users/eleme/Desktop/dudu/server/.venv/bin/python`
+4. 浏览到: `/Users/eleme/Desktop/ai-game/ai-3d/.venv/bin/python`
 5. 点击 **OK**
 
 ### 2. 运行预览
@@ -29,7 +29,7 @@
 
 1. 按 `Cmd+Shift+P` (Mac) 或 `Ctrl+Shift+P` (Windows/Linux)
 2. 输入 **Python: Select Interpreter**
-3. 选择: `~/Desktop/dudu/server/.venv/bin/python`
+3. 选择: `~/Desktop/ai-game/ai-3d/.venv/bin/python`
 
 ### 2. 运行
 
@@ -42,7 +42,7 @@
 在终端中运行:
 
 ```bash
-/Users/eleme/Desktop/dudu/server/.venv/bin/python -c "import ai3d; print(ai3d.__version__)"
+/Users/eleme/Desktop/ai-game/ai-3d/.venv/bin/python -c "import ai3d; print(ai3d.__version__)"
 ```
 
 应输出: `0.1.0`

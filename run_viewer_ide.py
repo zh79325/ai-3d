@@ -4,8 +4,8 @@ IDE-friendly launcher for 3D Skeleton Viewer.
 在 IDE 中直接运行此文件即可启动预览服务器。
 
 前置条件:
-- 确保 IDE 的 Python 解释器设置为: ~/Desktop/dudu/server/.venv/bin/python
-- 或在终端中先激活环境: source ~/Desktop/dudu/server/.venv/bin/activate
+- 确保 IDE 的 Python 解释器设置为: ~/Desktop/ai-game/ai-3d/.venv/bin/python
+- 或在终端中先激活环境: source ~/Desktop/ai-game/ai-3d/.venv/bin/activate
 """
 
 import sys
