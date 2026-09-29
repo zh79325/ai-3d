@@ -39,7 +39,7 @@ from .asset_worker import (
     AssetWorker,
     get_asset_worker,
 )
-from .axis_norm import ALIGN_VERSION, FACE_SEMANTICS
+from .axis_norm import ALIGN_VERSION
 from .job_worker import BindingError, BindingInputError, JobWorker, get_job_worker
 from .obb import FACE_LABELS
 from .schemas import DEFAULT_CAMERAS, CameraSpec, HealthResponse, RigPatch, ViewSpec
@@ -168,15 +168,14 @@ async def health() -> HealthResponse:
 
 @router.get("/conventions")
 async def conventions() -> JSONResponse:
-    """下发前后端**共享的固定约定**，避免面编号/语义轴在两侧各写一份走偏。
+    """下发前后端**共享的固定约定**，避免面标签/语义轴在两侧各写一份走偏。
 
-    面编号约定：``1=+axis0, 2=-axis0, 3=+axis1, 4=-axis1, 5=+axis2, 6=-axis2``，
-    ``extent_face`` 为该面所在的 OBB 局部轴标签（``u+/u-/v+/v-/w+/w-``）。
+    面编号约定（规范系米制外切盒）：``1=+X left, 2=-X right, 3=+Y up, 4=-Y down,
+    5=+Z front, 6=-Z back``，标签见 ``face_labels``。
     """
     return JSONResponse({
         "align_version": ALIGN_VERSION,
         "face_labels": list(FACE_LABELS),
-        "face_semantics": list(FACE_SEMANTICS),
         "canonical_axes": {"up": "+Y", "front": "+Z", "left": "+X"},
         "asset_states": [s.value for s in AssetState],
         "asset_kinds": [k.value for k in AssetKind],
@@ -239,7 +238,7 @@ async def upload_asset(
     asset_id: str,
     file: UploadFile = File(..., description="FBX / GLB / glTF"),
 ) -> AlignResponse:
-    """上传原件并**同步跑完 S1**，返回自动对齐提案（OBB / 六面 / 单位 / auto / final）。"""
+    """上传原件并**同步跑完 S1**，返回自动校准提案（PCA / 外切盒 / 单位 / auto / final）。"""
     _require_asset(asset_id)
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
@@ -257,7 +256,7 @@ async def upload_asset(
     unit = align.get("unit") or {}
     logger.info("素材 %s 上传 %s 并完成 S1：unit=%s height=%.4fm",
                 asset_id, raw.name, unit.get("detected"), unit.get("height_m") or 0.0)
-    return _align_response(asset_id, align, "S1 导入矫正完成，请核对外切盒面映射与单位后确认")
+    return _align_response(asset_id, align, "S1 导入矫正完成，请核对角色朝向与单位后确认")
 
 
 @router.get("/assets/{asset_id}/align")
@@ -272,11 +271,11 @@ async def get_align(asset_id: str) -> JSONResponse:
 
 @router.patch("/assets/{asset_id}/align", response_model=AlignResponse)
 async def patch_align(asset_id: str, patch: AlignPatch) -> AlignResponse:
-    """人工修正 S1：只改 ``manual`` 段（面映射 / 微调欧拉角 / 单位 / 真实身高）。
+    """人工修正 S1：只改 ``manual`` 段（前后翻转二选 / 单位 / 真实身高）。
 
-    后端在**原始模型坐标**下重测 OBB 与身高（``axis_norm._reset_canon`` 先复位旧的
-    canon 节点），重算 ``final`` 并原地改写 canon 节点的旋转与缩放；反复修正不会累积。
-    ``reset=true`` 清空全部人工修正，回到自动探测结果。
+    后端在**原始模型坐标**下重测 PCA / 校准基 / 包围盒与身高（``axis_norm._reset_canon``
+    先复位旧的 canon 节点），重算 ``final`` 并原地改写 canon 节点的旋转与缩放；反复
+    修正不会累积。``reset=true`` 清空全部人工修正，回到自动探测结果。
     """
     _require_asset(asset_id)
     if _store().load_align(asset_id) is None:

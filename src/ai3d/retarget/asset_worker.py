@@ -47,7 +47,8 @@ def merge_manual(current: Optional[Dict[str, Any]],
     """把 ``AlignPatch`` 合并进现有 align 的 ``manual`` 段，返回新的 manual。
 
     ``reset=True`` 直接清空全部人工修正（回到自动探测）；其余字段只在非 ``None`` 时
-    覆盖，``face_map`` 按约定整体替换而非逐面合并。
+    覆盖。校准基与外切盒由后端每次重测，人工能改的只有 ``front_flipped`` 二选与
+    两项覆盖。
 
     两项覆盖的**清除**约定（JSON 里 ``None`` 已被用作「不改」，故用哨兵值）：
     ``height_override <= 0`` 与 ``unit_override == ""`` 都表示取消该项人工覆盖。
@@ -57,10 +58,8 @@ def merge_manual(current: Optional[Dict[str, Any]],
         return manual
     if patch.reset:
         return {}
-    if patch.face_map is not None:
-        manual["face_map"] = {str(k): str(v) for k, v in patch.face_map.items()}
-    if patch.trim_euler is not None:
-        manual["trim_euler"] = [float(v) for v in patch.trim_euler]
+    if patch.front_flipped is not None:
+        manual["front_flipped"] = bool(patch.front_flipped)
     if patch.unit_override is not None:
         manual["unit_override"] = patch.unit_override.strip() or None
     if patch.height_override is not None:
@@ -110,7 +109,7 @@ class AssetWorker:
         except AlignInputError as exc:       # 输入问题：原样抛出（路由转 400）
             self._fail(asset_id, str(exc), prev_align, prev_state, glb.exists())
             raise
-        except ValueError as exc:            # 面映射/语义非法：属用户输入错误
+        except ValueError as exc:            # 人工输入非法：属用户输入错误
             self._fail(asset_id, str(exc), prev_align, prev_state, glb.exists())
             raise AlignInputError(str(exc)) from exc
         except AlignError as exc:

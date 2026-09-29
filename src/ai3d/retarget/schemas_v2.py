@@ -71,15 +71,14 @@ class AssetCreate(BaseModel):
 class AlignPatch(BaseModel):
     """PATCH /v2/assets/{id}/align：只改 ``manual`` 段，后端重算 ``final``。
 
-    ``face_map`` 为「面序号 → 语义轴」映射（面编号 1..6，语义见
-    :data:`ai3d.retarget.axis_norm.FACE_SEMANTICS`），整体替换而非合并；至少指派两个
-    不同语义轴，第三个由右手系导出。字段留 ``None`` 表示不改该项。
+    ``front_flipped`` = 前后方向是否相反（True 即绕规范系 Y 轴转 180°，对应人工
+    二选确认的「前后方向相反」）；校准基与外切盒由后端自动重测，不接受人工欧拉角。
+    字段留 ``None`` 表示不改该项。
 
     两项覆盖的**清除**用哨兵值（``None`` 已被占用为「不改」）：
     ``height_override <= 0`` 取消真实身高直填，``unit_override = ""`` 取消强制单位。
     """
-    face_map: Optional[Dict[str, str]] = None
-    trim_euler: Optional[List[float]] = Field(default=None, max_length=3)
+    front_flipped: Optional[bool] = None
     unit_override: Optional[str] = None
     height_override: Optional[float] = None
     reset: bool = False          # True = 清空全部人工修正，回到自动探测

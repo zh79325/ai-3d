@@ -7,8 +7,12 @@
 两套入口：
 - :func:`normalize_axes_file`（旧，``/v1`` 依赖）：自动探测 up/forward 并**吸附到世界
   坐标轴**，在场景根插入纯旋转节点 ``canon_axis_root``，不改顶点与动画通道。
-- :func:`align_asset`（S1 导入矫正）：改用最小体积 OBB（:mod:`obb`）给出的紧凑三轴
-  框架 + 面编号映射，除旋转外还做**单位缩放**（同一 canon 节点带 scale），产出
+- :func:`align_asset`（S1 导入矫正 V2）：校准基由语义先验（骨架 pelvis→head /
+  foot→ball；纯网格 bbox 最长轴 + 脚端双簇符号 / 最薄轴 + 头带前凸符号）吸附到模型
+  坐标轴组装（90° 置换，det=+1 无镜像），人工交互只有「当前朝向正确 / 前后方向相反」
+  二选（``manual.front_flipped``，相反左乘 ``diag(-1,1,-1)``）；PCA 三主轴写入
+  align.json 作缺先验时的轴线证据与调试展示；外切盒在**校准后**按规范系米制 AABB
+  测量（与 asset.glb 同坐标系）；另做**单位缩放**（同一 canon 节点带 scale），产出
   ``align.json`` 供前端立方体可视化与人工修正。
 
 探测策略（两套共用 :func:`estimate_directions`）：
@@ -28,12 +32,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ai3d.retarget.obb import FACE_AXES, FACE_LABELS, OBB, assign_faces, min_volume_obb
+from ai3d.retarget.obb import OBB, axis_aligned_bbox
 
 logger = logging.getLogger(__name__)
 
 AXES = np.eye(3)
-ALIGN_VERSION = 1               # align.json 结构版本，前端按它兼容读取
+ALIGN_VERSION = 2               # align.json 结构版本，前端按它兼容读取
 
 # 候选单位 → 换算到米的系数；推断时取「换算后身高最接近成人中值」者，
 # 比固定数量级区间鲁棒（inch 与 cm 的区间在 50~120 会重叠）
@@ -291,7 +295,7 @@ def _mesh_dirs(g, mats: List[np.ndarray],
 def _joint_points(g, mats: List[np.ndarray]) -> np.ndarray:
     """所有 skin 关节的全局位置 (n,3)；无骨架时返回空数组。
 
-    动画素材常见形态是“只有骨架没有网格”，此时顶点集为空，OBB 与身高只能拿
+    动画素材常见形态是“只有骨架没有网格”，此时顶点集为空，包围盒与身高只能拿
     关节位置量（否则单位推断拿不到 up 轴跨度，只能保留原尺度）。
     """
     pts: List[np.ndarray] = []
@@ -307,8 +311,7 @@ def _joint_points(g, mats: List[np.ndarray]) -> np.ndarray:
 def estimate_frame(g) -> Dict[str, Any]:
     """探测模型当前轴系，返回规范基向量（模型坐标表示）：left/up/forward + 诊断信息。
 
-    结果**吸附到世界坐标轴**（旧行为，``/v1`` 链路依赖，不得改）；S1 导入矫正改用
-    :func:`estimate_directions` 拿未吸附方向去贴合 OBB 面。
+    结果**吸附到世界坐标轴**（旧行为，``/v1`` 链路依赖，不得改）。
     """
     mats = global_matrices(g)
     names = [n.name or f"node{i}" for i, n in enumerate(g.nodes or [])]
@@ -349,11 +352,11 @@ def estimate_frame(g) -> Dict[str, Any]:
 
 
 def estimate_directions(g) -> Dict[str, Any]:
-    """探测 up / forward 的**未吸附**参考方向（模型坐标），供 OBB 面指派使用。
+    """探测 up / forward 的**未吸附**参考方向（模型坐标），供 S1 校准基组装使用。
 
     与 :func:`estimate_frame` 的差别：不吸附到世界坐标轴（斜放模型吸附会丢掉真实
-    朝向），改由 :func:`obb.assign_faces` 贴合到最接近的 OBB 面。骨架结果优先，
-    网格路径只补缺失的那一个方向（网格本身只能给出轴向）。
+    朝向），吸附由 :func:`calibrate_frame` 统一做。骨架结果优先，网格路径只补缺失
+    的那一个方向（网格本身只能给出轴向）。
     """
     mats = global_matrices(g)
     names = [n.name or f"node{i}" for i, n in enumerate(g.nodes or [])]
@@ -390,9 +393,8 @@ def estimate_directions(g) -> Dict[str, Any]:
         return {"up_dir": None, "forward_dir": None,
                 "method": "identity", "notes": notes}
     if fwd_dir is None:
-        # 纯骨架动画（无网格、又缺 toe/ball）的常见形态：up 已由 pelvis→head 定住，
-        # forward 交给 assign_faces 按最薄面兜底，**不得**把已知的 up 一并丢掉
-        notes.append("缺 forward 先验（无网格且无 toe/ball 骨），由最薄面兜底指派")
+        notes.append("缺 forward 先验（无网格且无 toe/ball 骨），forward 取原 +Z 轴")
+        fwd_dir = np.array([0.0, 0.0, 1.0])
     return {"up_dir": up_dir.tolist() if up_dir is not None else None,
             "forward_dir": fwd_dir.tolist() if fwd_dir is not None else None,
             "method": method, "notes": notes}
@@ -514,64 +516,12 @@ def normalize_axes_file(path) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# S1 导入矫正：OBB 面映射 → 规范系（新路径，/v2 资产库使用）
+# S1 轴校准 V2：PCA 主轴 + 语义先验 + 人工二选确认（/v2 资产库使用）
 # --------------------------------------------------------------------------- #
-# 语义 token → (R 的行索引, 符号)；行序与 frame_rotation 一致：
-# 0=left(+X)、1=up(+Y)、2=forward(+Z)
-_SEMANTIC_ROWS: Dict[str, Tuple[int, float]] = {
-    "up+": (1, 1.0), "up-": (1, -1.0),
-    "front+": (2, 1.0), "front-": (2, -1.0),
-    "left+": (0, 1.0), "left-": (0, -1.0),
-}
-# 常见写法归一（前端下拉直接用 FACE_SEMANTICS，这里只为兼容手写与 API 调用）
-_SEM_ALIASES: Dict[str, str] = {
-    "up": "up+", "y": "up+", "y+": "up+", "y-": "up-",
-    "front": "front+", "forward": "front+", "forward+": "front+", "forward-": "front-",
-    "fwd": "front+", "fwd+": "front+", "fwd-": "front-",
-    "z": "front+", "z+": "front+", "z-": "front-",
-    "left": "left+", "x": "left+", "x+": "left+", "x-": "left-",
-}
-FACE_SEMANTICS: Tuple[str, ...] = tuple(_SEMANTIC_ROWS)
-_ROW_NAMES: Tuple[str, ...] = ("left(+X)", "up(+Y)", "front(+Z)")
-_MANUAL_KEYS: Tuple[str, ...] = ("face_map", "trim_euler", "unit_override",
+_MANUAL_KEYS: Tuple[str, ...] = ("front_flipped", "unit_override",
                                  "height_override")
-
-
-def _parse_semantic(token: Any) -> Tuple[int, float]:
-    """把人工填写的语义 token 归一为 (R 行索引, 符号)；无法识别抛 ``ValueError``。"""
-    t = str(token or "").strip().lower().replace(" ", "")
-    t = _SEM_ALIASES.get(t, t)
-    if t not in _SEMANTIC_ROWS:
-        raise ValueError(f"无法识别的轴向语义 {token!r}，可选 "
-                         f"{'/'.join(FACE_SEMANTICS)}")
-    return _SEMANTIC_ROWS[t]
-
-
-def _euler_xyz_mat(deg: Any) -> np.ndarray:
-    """绕规范系固定轴 X→Y→Z 的外旋矩阵（度），即 ``Rz · Ry · Rx``。"""
-    src = np.asarray(list(deg) if deg is not None else [], dtype=np.float64).ravel()
-    a = np.zeros(3, dtype=np.float64)
-    a[:min(3, len(src))] = src[:3]
-    rx, ry, rz = np.deg2rad(a)
-    cx, sx = np.cos(rx), np.sin(rx)
-    cy, sy = np.cos(ry), np.sin(ry)
-    cz, sz = np.cos(rz), np.sin(rz)
-    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
-    rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
-    rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
-    return rot_z @ rot_y @ rot_x
-
-
-def _trim_list(raw: Any) -> List[float]:
-    """``trim_euler`` 归一为三个 float（度），缺失或非法项按 0 处理。"""
-    out = [0.0, 0.0, 0.0]
-    try:
-        src = [float(v) for v in (raw or [])][:3]
-    except (TypeError, ValueError):
-        return out
-    for i, v in enumerate(src):
-        out[i] = v if np.isfinite(v) else 0.0
-    return out
+# 前后方向相反 = 绕规范系 Y 轴转 180°（保持右手系，不产生镜像）
+_FLIP_Y = np.diag([-1.0, 1.0, -1.0])
 
 
 def _pos_float(raw: Any) -> Optional[float]:
@@ -583,54 +533,62 @@ def _pos_float(raw: Any) -> Optional[float]:
     return v if np.isfinite(v) and v > 0.0 else None
 
 
-def frame_from_face_map(obb: OBB, face_map: Dict[Any, Any],
-                        trim_euler: Any = None) -> np.ndarray:
-    """由「面序号 → 语义轴」映射组装 模型坐标 → 规范坐标 的旋转矩阵。
+def pca_axes(pts: np.ndarray) -> Optional[Dict[str, Any]]:
+    """中心化 + 协方差 + 特征分解，返回特征值**降序**的三主轴（模型坐标）。
 
-    ``face_map`` 形如 ``{"1": "up+", "5": "front+"}``（键可为 int/str，值语义见
-    :data:`FACE_SEMANTICS`）：面外法向即该语义轴在模型坐标下的方向。三轴缺其一时
-    由右手系导出（``left = cross(up, forward)``）；``trim_euler`` 为绕规范系
-    X/Y/Z 的外旋微调（度）后置叠加：``R = Rz·Ry·Rx · R_face``。
-
-    面序号越界、语义 token 不识别、同一语义轴被两面重复指派、或少于两个不同语义轴
-    时抛 ``ValueError``（由 ``/v2`` 路由转成 400）。
+    与方案 Eigen ``SelfAdjointEigenSolver`` 等价；中心化只用于本计算，不烘进资产
+    （canon 节点只带旋转+scale，脚底保持原点附近）。PCA 主轴对姿势敏感（飞踢姿势
+    主轴沿身体斜线），故**不直接作校准基**（方案 §3：「已有骨骼语义通常比纯几何
+    启发式更可靠」），写入 align.json 作缺先验时的轴线证据与调试展示。
     """
-    normals = obb.face_normals()
-    rows = np.zeros((3, 3), dtype=np.float64)
-    filled = np.zeros(3, dtype=bool)
-    seen: Dict[int, int] = {}
-    for key, token in dict(face_map or {}).items():
-        fid = int(key)
-        if not 1 <= fid <= 6:
-            raise ValueError(f"面序号须在 1..6：{key!r}")
-        row, sign = _parse_semantic(token)
-        if row in seen:
-            raise ValueError(f"{_ROW_NAMES[row]} 被面 {seen[row]} 与面 {fid} 重复指派")
-        seen[row] = fid
-        rows[row] = sign * normals[fid - 1]
-        filled[row] = True
-    missing = [i for i in range(3) if not filled[i]]
-    if len(missing) > 1:
-        raise ValueError("至少要在六面中指派两个不同的语义轴（第三个由右手系导出）")
-    for i in missing:
-        # 规范系为右手：X=left, Y=up, Z=forward，故 row_i = cross(row_i+1, row_i+2)
-        rows[i] = np.cross(rows[(i + 1) % 3], rows[(i + 2) % 3])
-    if not np.allclose(rows @ rows.T, np.eye(3), atol=1e-6) \
-            or float(np.linalg.det(rows)) <= 0.0:
-        raise ValueError("面映射得到的三轴不正交或构成左手系，"
-                         "请检查是否把对偶面（如 1 与 2）指派成了两个语义轴")
-    r_trim = _euler_xyz_mat(trim_euler)
-    if not np.allclose(r_trim, np.eye(3), atol=1e-12):
-        rows = r_trim @ rows
-    return rows
+    p = np.asarray(pts, dtype=np.float64)
+    if len(p) < 16:
+        return None
+    c = p - p.mean(axis=0)
+    cov = c.T @ c / len(c)
+    vals, vecs = np.linalg.eigh(cov)          # 特征值升序
+    order = np.argsort(vals)[::-1]
+    return {"eigenvalues": [round(float(vals[i]), 6) for i in order],
+            "axes": [[round(float(v), 6) for v in vecs[:, i]] for i in order]}
+
+
+def calibrate_frame(dirs: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """由语义先验组装 模型坐标 → 规范坐标 的旋转矩阵：行 = [left, up, forward]。
+
+    up / forward 取 :func:`estimate_directions` 的未吸附方向并吸附到模型坐标轴
+    （旋转恒为 90° 置换，不会复现最小体积 OBB / PCA 斜轴的「转斜」）；forward 先
+    对 up 正交化再吸附；left = cross(up, forward)；det 检查防镜像。先验全缺时返回
+    identity 并记入 notes。
+    """
+    notes: List[str] = []
+    if dirs.get("up_dir") is None or dirs.get("forward_dir") is None:
+        notes.append("缺朝向先验，保持原轴系（identity）")
+        return np.eye(3), {"method": dirs.get("method"), "notes": notes,
+                           "up": [0.0, 1.0, 0.0], "forward": [0.0, 0.0, 1.0]}
+    up = _snap_axis(np.asarray(dirs["up_dir"], dtype=np.float64))
+    fwd_raw = np.asarray(dirs["forward_dir"], dtype=np.float64)
+    fwd = _snap_axis(fwd_raw - up * float(np.dot(fwd_raw, up)),
+                     forbid=int(np.argmax(np.abs(up))))
+    if np.linalg.norm(up) < 0.5 or np.linalg.norm(fwd) < 0.5:
+        notes.append("先验方向退化，保持原轴系（identity）")
+        return np.eye(3), {"method": dirs.get("method"), "notes": notes,
+                           "up": [0.0, 1.0, 0.0], "forward": [0.0, 0.0, 1.0]}
+    left = np.cross(up, fwd)
+    rot = np.stack([left, up, fwd])
+    if float(np.linalg.det(rot)) <= 0.0:      # left 由 cross 导出，理论上不会触发
+        fwd = -fwd
+        rot = np.stack([np.cross(up, fwd), up, fwd])
+        notes.append("det 检查翻转了 forward 符号（防镜像）")
+    return rot, {"method": dirs.get("method"), "notes": notes,
+                 "up": up.tolist(), "forward": fwd.tolist()}
 
 
 def _reset_canon(g) -> None:
     """把已存在的 canon 节点复位为单位变换。
 
-    OBB 与身高都必须在**原始模型坐标**下测量；人工修正会反复重跑，不先复位就会在
+    包围盒与身高都必须在**原始模型坐标**下测量；人工修正会反复重跑，不先复位就会在
     上一次的旋转结果上再测一次（旋转累积 + 身高量错）。也因此，``normalize_to_glb``
-    旧路径插入的吸附旋转会被复位后由 OBB 结果接管，不会叠加。
+    旧路径插入的吸附旋转会被复位后由校准结果接管，不会叠加。
     """
     for n in (g.nodes or []):
         if (n.name or "") == CANON_NODE:
@@ -664,10 +622,12 @@ def _same_trs(a: Optional[Tuple[np.ndarray, np.ndarray]],
 
 
 def build_align(g, align: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """在已加载的 GLB 上算出 align.json 结构（不改场景变换、不落盘）。
+    """在已加载的 GLB 上算出 align.json v2 结构（不改场景变换、不落盘）。
 
     ``align`` 传入上一次的完整 align.json 或直接传 ``manual`` 段均可；只有 ``manual``
-    影响结果，OBB 与自动指派每次重测。``final.changed`` 留给 :func:`align_asset` 填。
+    影响结果，PCA / 校准基 / 包围盒每次重测。旧 v1 的 ``face_map`` / ``trim_euler``
+    字段被忽略（点一次「应用修正」即升级 v2）。``final.changed`` 留给
+    :func:`align_asset` 填。
     """
     _reset_canon(g)
     mats = global_matrices(g)
@@ -682,58 +642,31 @@ def build_align(g, align: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         raw_manual = {k: v for k, v in align.items() if k in _MANUAL_KEYS}
     override = raw_manual.get("unit_override")
     manual: Dict[str, Any] = {
-        "face_map": {str(k): str(v) for k, v in (raw_manual.get("face_map") or {}).items()},
-        "trim_euler": _trim_list(raw_manual.get("trim_euler")),
+        "front_flipped": bool(raw_manual.get("front_flipped")),
         "unit_override": str(override).strip().lower() if override else None,
         "height_override": _pos_float(raw_manual.get("height_override")),
     }
     notes: List[str] = list(dirs.get("notes") or [])
     if from_joints:
-        notes.append("无网格：OBB 与身高按骨架关节位置测量（动画素材的常见形态）")
-    auto: Dict[str, Any] = {"up_face": None, "forward_face": None, "left_face": None,
-                            "method": dirs.get("method"), "notes": notes}
-    faces: List[Dict[str, Any]] = []
-    obb = min_volume_obb(pts)
-    if obb is None:
-        notes.append("OBB 求解失败（顶点不足或共面），退化为世界轴吸附")
-    else:
-        normals = obb.face_normals()
-        ext = np.asarray(obb.extents, dtype=np.float64)
-        faces = [{"id": i + 1,
-                  "normal": [round(float(v), 6) for v in normals[i]],
-                  "extent_face": FACE_LABELS[i],
-                  "extent": round(float(ext[FACE_AXES[i][0]]), 6)} for i in range(6)]
-        up_dir = np.asarray(dirs["up_dir"], dtype=np.float64) if dirs.get("up_dir") else None
-        fwd_dir = (np.asarray(dirs["forward_dir"], dtype=np.float64)
-                   if dirs.get("forward_dir") else None)
-        got = assign_faces(obb, up_dir, fwd_dir)
-        auto.update({"up_face": got["up_face"], "forward_face": got["forward_face"],
-                     "left_face": got["left_face"]})
-        notes.extend(got["notes"])
-    # manual 非空即整体采用（left 可缺省）；为空则用 auto 指派的 up/front 两面
-    face_map = dict(manual["face_map"])
-    if not face_map:
-        if auto["up_face"]:
-            face_map[str(auto["up_face"])] = "up+"
-        if auto["forward_face"]:
-            face_map[str(auto["forward_face"])] = "front+"
-    if obb is not None:
-        rot = frame_from_face_map(obb, face_map, manual["trim_euler"])
-    else:
-        rot = _euler_xyz_mat(manual["trim_euler"]) @ frame_rotation(estimate_frame(g))
-    if obb is not None and auto["up_face"]:
-        extent_up = float(obb.extents[FACE_AXES[auto["up_face"] - 1][0]])
-    else:
-        span = (pts.max(0) - pts.min(0)) if len(pts) else np.zeros(3)
-        extent_up = float(span.max())
+        notes.append("无网格：包围盒与身高按骨架关节位置测量（动画素材的常见形态）")
+    rot, auto = calibrate_frame(dirs)
+    notes.extend(auto["notes"])
+    if manual["front_flipped"]:
+        rot = _FLIP_Y @ rot
+    # 规范系（米制）包围盒：先把顶点旋到规范朝向量 up 跨度定单位，再乘 scale 得米制；
+    # 与 asset.glb 同坐标系，前端直接画、六面标签即语义名
+    cal_pts = pts @ rot.T if len(pts) else np.zeros((0, 3))
+    span = (cal_pts.max(0) - cal_pts.min(0)) if len(cal_pts) else np.zeros(3)
+    extent_up = float(span[1]) if float(span[1]) > 1e-9 else float(span.max())
     unit = estimate_unit(extent_up, target_height=manual["height_override"],
                          unit=manual["unit_override"])
+    bbox = axis_aligned_bbox(cal_pts * unit["scale"]) if len(cal_pts) else None
     return {
         "version": ALIGN_VERSION,
-        "obb": obb.to_dict() if obb is not None else None,
-        "faces": faces,
+        "pca": pca_axes(pts),
+        "bbox": bbox.to_dict() if bbox is not None else None,
         "unit": unit,
-        "auto": auto,
+        "auto": {**auto, "notes": notes},
         "manual": manual,
         "final": {"rotation": [[round(float(v), 9) for v in row] for row in rot],
                   "scale": unit["scale"], "changed": False},
@@ -742,13 +675,12 @@ def build_align(g, align: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 def align_asset(path, align: Optional[Dict[str, Any]] = None,
                 json_path=None) -> Dict[str, Any]:
-    """S1 导入矫正：对已归一为 GLB 的资产做 OBB + 单位 + 面映射矫正（原地保存）。
+    """S1 导入矫正 V2：对已归一为 GLB 的资产做 PCA + 校准基 + 单位矫正（原地保存）。
 
-    与 :func:`normalize_axes_file` 的区别：旋转不限于世界轴吸附（OBB 给出最紧凑摆放），
-    且附带单位缩放。传入上一次的 align.json 即走人工修正重算路径：``PATCH`` 只改
-    ``manual``，本函数重测 OBB 并重算 ``final`` + 重写 canon 节点。
-
-    返回完整 align.json 结构；``json_path`` 给定时同时写出侧车文件。
+    校准基由语义先验吸附到模型坐标轴组装（90° 置换），人工修正只改 ``manual``
+    （``front_flipped`` / 单位 / 身高），本函数重测 PCA 与包围盒并重算 ``final`` +
+    重写 canon 节点。返回完整 align.json v2 结构；``json_path`` 给定时同时写出
+    侧车文件。
     """
     from ai3d.retarget.glb_io import _load, save_glb
 
@@ -766,9 +698,10 @@ def align_asset(path, align: Optional[Dict[str, Any]] = None,
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     auto = info["auto"]
-    logger.info("S1 对齐 %s：%s up_face=%s front_face=%s unit=%s scale=%.6g "
+    logger.info("S1 对齐 %s：%s up=%s fwd=%s flipped=%s unit=%s scale=%.6g "
                 "height=%.4fm changed=%s %s",
-                Path(path).name, auto["method"], auto["up_face"], auto["forward_face"],
-                info["unit"]["detected"], info["final"]["scale"],
-                info["unit"]["height_m"], changed, ";".join(auto["notes"]) or "")
+                Path(path).name, auto["method"], auto["up"], auto["forward"],
+                info["manual"]["front_flipped"], info["unit"]["detected"],
+                info["final"]["scale"], info["unit"]["height_m"], changed,
+                ";".join(auto["notes"]) or "")
     return info
